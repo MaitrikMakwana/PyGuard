@@ -4,14 +4,14 @@
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 
 ## Overview
-PyGuard Pro is a real-time, rule-based Intrusion Detection System (IDS) and advanced network packet analyzer. It captures network packets, extracts and stores all protocol details (Ethernet, IP, TCP, UDP, ICMP, ARP, DNS, HTTP, and more) in a database, and provides both summary and detailed inspection features, similar to Wireshark.
+PyGuard Pro is a real-time, **machine learning-based Intrusion Detection System (IDS)** and advanced network packet analyzer. It captures network packets, extracts and stores all protocol details (Ethernet, IP, TCP, UDP, ICMP, ARP, DNS, HTTP, and more) in a database, and provides both summary and detailed inspection features, similar to Wireshark. The IDS leverages ML models to detect anomalous or malicious network activity, going beyond traditional rule-based detection.
 
 ## Features
 - Real-time packet capture (Scapy)
 - Deep protocol inspection (Ethernet, IP, TCP, UDP, ICMP, ARP, DNS, HTTP, etc.)
 - Stores all protocol fields as JSON in the database
 - Packet summary and detailed inspection (Wireshark-like)
-- Rule/statistics-based intrusion detection
+- **Machine learning-based intrusion detection** (supports supervised and anomaly detection models)
 - Database logging
 - Web dashboard (planned)
 
@@ -30,15 +30,23 @@ PyGuard Pro is a real-time, rule-based Intrusion Detection System (IDS) and adva
    ```powershell
    pip install -r requirements.txt
    ```
-4. **Run the packet sniffer:**
+4. **Train or load an ML model:**
+   - Use provided scripts or your own data to train a model (see `docs/feature_plan.md` for details).
+   - Save the trained model as `model.pkl` (or similar).
+5. **Run the packet sniffer:**
    ```powershell
    python packet_sniffer.py -c 10
    ```
-5. **View captured packets and inspect details:**
+6. **View captured packets and inspect details:**
    ```powershell
    python view_packets.py
    # Enter a row number to see full protocol details for a packet
    ```
+
+## ML-based Intrusion Detection
+- The system extracts features from each packet or flow and uses a trained ML model to classify or flag anomalies.
+- You can use any scikit-learn compatible model (Random Forest, SVM, Isolation Forest, etc.).
+- See `docs/feature_plan.md` for guidance on feature engineering and model training.
 
 ## Contributing
 Contributions are welcome! Please open issues or pull requests. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
@@ -51,7 +59,7 @@ This project follows the [Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.
 
 ## Team Roles
 - **A**: Packet Capture & DB Integration (Backend)
-- **B**: Detection Engine & Data Analysis
+- **B**: Detection Engine & Data Analysis (ML)
 - **C**: Web Dashboard & UI/UX (Frontend & DevOps)
 
 ## Documentation
