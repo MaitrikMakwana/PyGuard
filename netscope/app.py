@@ -26,8 +26,15 @@ class NetScopeApp(QMainWindow):
     def __init__(self):
         super().__init__()
         from PyQt5.QtGui import QFont, QIcon
-        self.setWindowTitle('NetScope – Network Analyzer')
+        self.setWindowTitle('PyGuard – Network Analyzer')
         self.setMinimumSize(1400, 900)
+        # Clear packets table on startup
+        import sqlite3
+        conn = sqlite3.connect('packets.db')
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM packets')
+        conn.commit()
+        conn.close()
         # Central widget and layout
         central = QWidget()
         vbox = QVBoxLayout(central)
@@ -240,6 +247,8 @@ class NetScopeApp(QMainWindow):
         self.clearAllButton.clicked.connect(self.clear_all_packets)
         self.exportCSVButton.clicked.connect(self.export_csv)
         self.filterTab.filterLineEdit.returnPressed.connect(self.apply_filter)
+        # Enable navigation from filter tab to packet details
+        self.filterTab.filterTable.cellClicked.connect(self.show_filtered_packet_details)
 
     def start_capture(self):
         interface = self._auto_select_interface()
@@ -259,58 +268,90 @@ class NetScopeApp(QMainWindow):
         self.update_live_table()
 
     def _parse_filter(self, filter_str):
-        # Supports: ip.src==, ip.dst==, tcp.port==, udp.port==, protocol==, BPF like 'tcp port 80', AND (&&), OR (||)
+        # Enhanced Wireshark-like filter parser
+        # Supports: src_ip, dst_ip, src_port, dst_port, protocol, size, timestamp
+        # Operators: ==, !=, >, <, >=, <=, contains
+        # Logical: and, or, not, parentheses
         if not filter_str.strip():
             return None, []
-        # Split by OR (||)
-        or_clauses = [c.strip() for c in filter_str.split('||') if c.strip()]
-        or_sql = []
-        or_params = []
-        for or_clause in or_clauses:
-            # Split by AND (&&)
-            and_clauses = [a.strip() for a in or_clause.split('&&') if a.strip()]
-            and_sql = []
-            and_params = []
-            for clause in and_clauses:
-                # BPF-like: tcp, udp, icmp, arp, dns, tcp port 80, etc.
-                bpf_match = re.match(r'^(tcp|udp|icmp|arp|dns)( port (\d+))?$', clause, re.IGNORECASE)
-                if bpf_match:
-                    proto = bpf_match.group(1).upper()
-                    port = bpf_match.group(3)
-                    sql = 'protocol = ?'
-                    params = [proto]
-                    if port:
-                        sql += ' AND (src_port = ? OR dst_port = ?)'
-                        params += [port, port]
-                    and_sql.append(sql)
-                    and_params.extend(params)
-                    continue
-                # Wireshark-like field filters
-                m_ip_src = re.match(r'ip\.src==([\d\.]+)', clause)
-                m_ip_dst = re.match(r'ip\.dst==([\d\.]+)', clause)
-                m_tcp_port = re.match(r'tcp\.port==([\d]+)', clause)
-                m_udp_port = re.match(r'udp\.port==([\d]+)', clause)
-                m_proto = re.match(r'protocol==([A-Za-z0-9]+)', clause)
-                if m_ip_src:
-                    and_sql.append('src_ip = ?')
-                    and_params.append(m_ip_src.group(1))
-                elif m_ip_dst:
-                    and_sql.append('dst_ip = ?')
-                    and_params.append(m_ip_dst.group(1))
-                elif m_tcp_port:
-                    and_sql.append('(src_port = ? OR dst_port = ?)')
-                    and_params += [m_tcp_port.group(1), m_tcp_port.group(1)]
-                elif m_udp_port:
-                    and_sql.append('(src_port = ? OR dst_port = ?)')
-                    and_params += [m_udp_port.group(1), m_udp_port.group(1)]
-                elif m_proto:
-                    and_sql.append('protocol = ?')
-                    and_params.append(m_proto.group(1).upper())
-            if and_sql:
-                or_sql.append('(' + ' AND '.join(and_sql) + ')')
-                or_params.extend(and_params)
-        if or_sql:
-            return ' OR '.join(or_sql), or_params
+        # Map Wireshark/common field names to DB columns
+        field_map = {
+            'src_ip': 'src_ip',
+            'dst_ip': 'dst_ip',
+            'src_port': 'src_port',
+            'dst_port': 'dst_port',
+            'protocol': 'protocol',
+            'size': 'size',
+            'timestamp': 'timestamp',
+        }
+        # Tokenize (very basic, not a full parser)
+        import re
+        tokens = re.findall(r'\w+|==|!=|>=|<=|>|<|\(|\)|contains|and|or|not|"[^"]*"|\'[^\']*\'|\S', filter_str)
+        sql = ''
+        params = []
+        i = 0
+        def parse_expr():
+            nonlocal i
+            expr = ''
+            while i < len(tokens):
+                token = tokens[i]
+                if token == '(': 
+                    i += 1
+                    subexpr = parse_expr()
+                    expr += f'({subexpr})'
+                elif token == ')':
+                    i += 1
+                    break
+                elif token.lower() == 'and':
+                    expr += ' AND '
+                    i += 1
+                elif token.lower() == 'or':
+                    expr += ' OR '
+                    i += 1
+                elif token.lower() == 'not':
+                    expr += ' NOT '
+                    i += 1
+                elif token in field_map:
+                    field = field_map[token]
+                    i += 1
+                    if i < len(tokens):
+                        op = tokens[i]
+                        i += 1
+                        if op in ['==', '!=', '>', '<', '>=', '<=']:
+                            if i < len(tokens):
+                                value = tokens[i]
+                                i += 1
+                                if value.startswith('"') and value.endswith('"') or value.startswith("'") and value.endswith("'"):
+                                    value = value[1:-1]
+                                expr += f'{field} {op.replace("==", "=")} ?'
+                                params.append(value)
+                            else:
+                                expr += f'{field} {op.replace("==", "=")} ?'
+                                params.append('')
+                        elif op == 'contains':
+                            if i < len(tokens):
+                                value = tokens[i]
+                                i += 1
+                                if value.startswith('"') and value.endswith('"') or value.startswith("'") and value.endswith("'"):
+                                    value = value[1:-1]
+                                expr += f'{field} LIKE ?'
+                                params.append(f'%{value}%')
+                            else:
+                                expr += f'{field} LIKE ?'
+                                params.append('%%')
+                        else:
+                            # Unknown operator, skip
+                            pass
+                    else:
+                        # Field with no operator, skip
+                        pass
+                else:
+                    # Unknown token, skip
+                    i += 1
+            return expr
+        sql = parse_expr()
+        if sql:
+            return sql, params
         return None, []
 
     def update_live_table(self):
@@ -730,7 +771,7 @@ class NetScopeApp(QMainWindow):
             info_layout = QVBoxLayout(info_panel)
             info_layout.setContentsMargins(32, 24, 32, 24)
             info_layout.setSpacing(10)
-            title = QLabel('👋 Welcome to NetScope!')
+            title = QLabel('👋 Welcome to PyGuard!')
             title.setStyleSheet('color: #FFFFFF; font-size: 22px; font-weight: bold;')
             info_layout.addWidget(title)
             steps = QLabel('''<ul style="margin-left: 0; padding-left: 18px; color: #B0B0B0; font-size: 16px;">
@@ -820,6 +861,66 @@ class NetScopeApp(QMainWindow):
         # Switch to Packet Details tab
         self.tabs.setCurrentWidget(self.packetDetailsTab)
 
+    def show_filtered_packet_details(self, row, col):
+        # Get packet data from the selected row in the filter table
+        table = self.filterTab.filterTable
+        timestamp = table.item(row, 0).text() if table.item(row, 0) else ''
+        src_ip = table.item(row, 1).text() if table.item(row, 1) else ''
+        # Fetch details JSON from DB for this packet
+        import sqlite3, json
+        conn = sqlite3.connect('packets.db')
+        cursor = conn.cursor()
+        cursor.execute("SELECT details FROM packets WHERE timestamp=? AND src_ip=? LIMIT 1", (timestamp, src_ip))
+        result = cursor.fetchone()
+        details = {}
+        if result and result[0]:
+            try:
+                details = json.loads(result[0])
+            except Exception:
+                details = {}
+        conn.close()
+        # Build protocol tree
+        tree = self.packetDetailsTab.protocolTree
+        tree.clear()
+        from PyQt5.QtWidgets import QTreeWidgetItem
+        layer_fields = [
+            ('Ethernet', ['eth_src', 'eth_dst', 'eth_type']),
+            ('IP', ['ip_version', 'ip_ihl', 'ip_tos', 'ip_len', 'ip_id', 'ip_flags', 'ip_frag', 'ip_ttl', 'ip_proto', 'ip_chksum', 'ip_options']),
+            ('TCP', ['tcp_seq', 'tcp_ack', 'tcp_dataofs', 'tcp_reserved', 'tcp_flags', 'tcp_window', 'tcp_chksum', 'tcp_urgptr', 'tcp_options']),
+            ('UDP', ['udp_len', 'udp_chksum']),
+            ('DNS', ['dns_id', 'dns_qr', 'dns_opcode', 'dns_aa', 'dns_tc', 'dns_rd', 'dns_ra', 'dns_z', 'dns_rcode', 'dns_qdcount', 'dns_ancount', 'dns_nscount', 'dns_arcount', 'dns_qd', 'dns_an']),
+            ('ICMP', ['icmp_type', 'icmp_code', 'icmp_chksum', 'icmp_id', 'icmp_seq']),
+            ('ARP', ['arp_hwtype', 'arp_ptype', 'arp_hwlen', 'arp_plen', 'arp_op', 'arp_hwsrc', 'arp_psrc', 'arp_hwdst', 'arp_pdst']),
+            ('HTTP', ['http_data']),
+        ]
+        for layer, fields in layer_fields:
+            layer_present = any(f in details for f in fields)
+            if layer_present:
+                layer_item = QTreeWidgetItem([layer])
+                for f in fields:
+                    if f in details:
+                        QTreeWidgetItem(layer_item, [f"{f}: {details[f]}"])
+                tree.addTopLevelItem(layer_item)
+        # Show raw/hex payload if available
+        hex_dump = details.get('raw', '')
+        if hex_dump:
+            try:
+                hex_bytes = bytes.fromhex(hex_dump)
+                ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in hex_bytes)
+                hex_lines = []
+                for i in range(0, len(hex_bytes), 16):
+                    chunk = hex_bytes[i:i+16]
+                    hex_part = ' '.join(f'{b:02X}' for b in chunk)
+                    ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+                    hex_lines.append(f'{i:04X}  {hex_part:<48}  {ascii_part}')
+                self.packetDetailsTab.hexDumpEdit.setPlainText('\n'.join(hex_lines))
+            except Exception:
+                self.packetDetailsTab.hexDumpEdit.setPlainText(hex_dump)
+        else:
+            self.packetDetailsTab.hexDumpEdit.setPlainText('')
+        # Switch to Packet Details tab
+        self.tabs.setCurrentWidget(self.packetDetailsTab)
+
     def update_statistics_tab(self):
         print("DEBUG: update_statistics_tab called")
         import sqlite3, collections
@@ -875,8 +976,20 @@ class NetScopeApp(QMainWindow):
                 labels.append(proto)
                 values.append(count)
         self.statisticsTab.protocolPieChart.clear()
-        bar = pg.BarGraphItem(x=np.array([0, 1]), height=[1, 2], width=0.6, brush='r')
-        self.statisticsTab.protocolPieChart.addItem(bar)
+        # Draw pie chart for protocol usage
+        if values:
+            total = sum(values)
+            start_angle = 0
+            for i, (label, value) in enumerate(zip(labels, values)):
+                angle_span = 360 * value / total
+                color = color_map.get(label, '#757575')
+                pie_slice = pg.QtGui.QGraphicsEllipseItem(-100, -100, 200, 200)
+                pie_slice.setStartAngle(int(start_angle * 16))
+                pie_slice.setSpanAngle(int(angle_span * 16))
+                pie_slice.setBrush(pg.mkBrush(color))
+                pie_slice.setPen(pg.mkPen('w', width=2))
+                self.statisticsTab.protocolPieChart.addItem(pie_slice)
+                start_angle += angle_span
 
         self.statisticsTab.sizeHistogram.clear()
         bar2 = pg.BarGraphItem(x=np.array([0, 1]), height=[2, 1], width=0.6, brush='b')
