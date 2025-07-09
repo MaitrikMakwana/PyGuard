@@ -80,3 +80,14 @@ Contributions are welcome! Please open issues or pull requests. See [CONTRIBUTIN
 
 ## License
 MIT License
+
+## Technology Stack
+
+| Layer         | Technology         | Purpose/Usage                                  |
+|---------------|--------------------|------------------------------------------------|
+| UI            | PyQt5, pyqtgraph   | Desktop GUI, charts, tables, dialogs           |
+| Packet Capture| Scapy              | Live network packet sniffing and parsing       |
+| Storage       | sqlite3            | Local SQL database for packets                 |
+| ML            | scikit-learn, numpy| Anomaly/threat detection, statistics           |
+| Utilities     | csv, collections, etc. | Data import/export, parsing, filtering     |
+| Language      | Python 3.8+        | All application logic                          |
