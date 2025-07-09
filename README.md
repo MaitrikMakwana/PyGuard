@@ -1,10 +1,10 @@
-# NetScope: Python Desktop Network Analyzer & ML-based Host Intrusion Detection
+# PyGuard: Python Desktop Network Analyzer & ML-based Host Intrusion Detection
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 
 ## Overview
-NetScope is a modern Python desktop application for real-time network packet capture, storage, analysis, and host-based intrusion detection using machine learning. Built with PyQt5, it provides an interactive GUI for live monitoring, filtering, protocol inspection, statistics, and ML-driven threat alerts—all in one place.
+PyGuard is a modern Python desktop application for real-time network packet capture, storage, analysis, and host-based intrusion detection using machine learning. Built with PyQt5, it provides an interactive GUI for live monitoring, filtering, protocol inspection, statistics, and ML-driven threat alerts—all in one place.
 
 ## Features
 - **Real-time packet capture** (Scapy backend)

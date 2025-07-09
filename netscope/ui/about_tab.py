@@ -6,7 +6,7 @@ class AboutTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
-        title = QLabel('NetScope v1.0')
+        title = QLabel('PyGuard v1.0')
         title.setFont(QFont('Segoe UI', 20, QFont.Bold))
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)

@@ -28,6 +28,33 @@ class StatisticsTab(QWidget):
         self.protocolPieChart.setTitle('Protocol Usage Breakdown', color='#B0B0B0', size='16pt')
         top_row.addWidget(self.protocolPieChart)
         layout.addLayout(top_row)
+        # Protocol Legend
+        legend_row = QHBoxLayout()
+        protocol_colors = [
+            ('TCP', '#1976D2'),
+            ('UDP', '#00BCD4'),
+            ('ICMP', '#43A047'),
+            ('ARP', '#FBC02D'),
+            ('DNS', '#8E24AA'),
+            ('HTTP', '#E64A19'),
+            ('OTHER', '#757575'),
+        ]
+        for proto, color in protocol_colors:
+            color_box = QFrame()
+            color_box.setFixedSize(18, 18)
+            color_box.setStyleSheet(f'background: {color}; border-radius: 4px; border: 1px solid #222;')
+            label = QLabel(proto)
+            label.setStyleSheet('color: #E0E0E0; font-size: 13px; margin-left: 6px; margin-right: 18px;')
+            legend_item = QHBoxLayout()
+            legend_item.setSpacing(0)
+            legend_item.addWidget(color_box)
+            legend_item.addWidget(label)
+            legend_item.setAlignment(Qt.AlignLeft)
+            legend_widget = QWidget()
+            legend_widget.setLayout(legend_item)
+            legend_row.addWidget(legend_widget)
+        legend_row.addStretch(1)
+        layout.addLayout(legend_row)
         # Middle row: Top Talkers and Port Stats
         mid_row = QHBoxLayout()
         # Top Talkers Table
