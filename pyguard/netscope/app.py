@@ -16,6 +16,16 @@ from netscope.backend.capture import CaptureManager
 import sqlite3
 from scapy.all import get_if_list, sniff
 import re
+import json
+
+# Import enhanced filtering components
+try:
+    from netscope.backend.packet_sniffer import validate_filter, get_common_filters
+    from netscope.backend.advanced_packet_viewer import AdvancedPacketViewer
+    ENHANCED_FILTERING = True
+except ImportError as e:
+    print(f"Warning: Enhanced filtering not available: {e}")
+    ENHANCED_FILTERING = False
 from PyQt5.QtWidgets import QGraphicsOpacityEffect, QProgressBar
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QSizePolicy
 from PyQt5.QtCore import Qt
@@ -28,13 +38,8 @@ class NetScopeApp(QMainWindow):
         from PyQt5.QtGui import QFont, QIcon
         self.setWindowTitle('PyGuard – Network Analyzer')
         self.setMinimumSize(1400, 900)
-        # Clear packets table on startup
-        import sqlite3
-        conn = sqlite3.connect('packets.db')
-        cursor = conn.cursor()
-        cursor.execute('DELETE FROM packets')
-        conn.commit()
-        conn.close()
+        # Initialize database with enhanced schema
+        self._init_enhanced_database()
         # Central widget and layout
         central = QWidget()
         vbox = QVBoxLayout(central)
@@ -156,6 +161,9 @@ class NetScopeApp(QMainWindow):
         self._connect_signals()
         # Connect packet selection to details tab
         self.liveCaptureTab.packetTable.cellClicked.connect(self.show_packet_details)
+        # Connect filter tab signals
+        if hasattr(self.filterTab, 'filterApplied'):
+            self.filterTab.filterApplied.connect(self._on_filter_applied)
         # Timer for live updates
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_live_table)
@@ -240,32 +248,141 @@ class NetScopeApp(QMainWindow):
         progress_bar._value_anim = anim
 
     def _connect_signals(self):
+        # Disconnect previous connections if any to avoid duplicate popups
+        try:
+            self.startButton.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            self.stopButton.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            self.clearAllButton.clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            self.exportCSVButton.clicked.disconnect()
+        except Exception:
+            pass
+        # Connect only once
         self.startButton.clicked.connect(self.start_capture)
         self.stopButton.clicked.connect(self.stop_capture)
-        self.filterTab.applyButton.clicked.connect(self.apply_filter)
-        self.filterTab.clearButton.clicked.connect(self.clear_filter)
+        if hasattr(self.filterTab, 'applyButton'):
+            try:
+                self.filterTab.applyButton.clicked.disconnect()
+            except Exception:
+                pass
+            self.filterTab.applyButton.clicked.connect(self.apply_filter)
+        if hasattr(self.filterTab, 'clearButton'):
+            try:
+                self.filterTab.clearButton.clicked.disconnect()
+            except Exception:
+                pass
+            self.filterTab.clearButton.clicked.connect(self.clear_filter)
+        if hasattr(self.filterTab, 'filterLineEdit'):
+            try:
+                self.filterTab.filterLineEdit.returnPressed.disconnect()
+            except Exception:
+                pass
+            self.filterTab.filterLineEdit.returnPressed.connect(self.apply_filter)
         self.clearAllButton.clicked.connect(self.clear_all_packets)
         self.exportCSVButton.clicked.connect(self.export_csv)
-        self.filterTab.filterLineEdit.returnPressed.connect(self.apply_filter)
-        # Enable navigation from filter tab to packet details
-        self.filterTab.filterTable.cellClicked.connect(self.show_filtered_packet_details)
+        if hasattr(self.filterTab, 'filterTable'):
+            try:
+                self.filterTab.filterTable.cellClicked.disconnect()
+            except Exception:
+                pass
+            self.filterTab.filterTable.cellClicked.connect(self.show_filtered_packet_details)
+        if hasattr(self.liveCaptureTab, 'packetSelected'):
+            try:
+                self.liveCaptureTab.packetSelected.disconnect()
+            except Exception:
+                pass
+            self.liveCaptureTab.packetSelected.connect(self._on_packet_selected)
 
     def start_capture(self):
         interface = self._auto_select_interface()
-        bpf_filter = self.filterTab.filterLineEdit.text()
+        
+        # Get BPF filter from filter tab
+        if hasattr(self.filterTab, 'get_current_bpf_filter'):
+            bpf_filter = self.filterTab.get_current_bpf_filter()
+        else:
+            bpf_filter = getattr(self.filterTab, 'filterLineEdit', QLineEdit()).text()
+        
+        # Validate filter if enhanced filtering is available
+        if ENHANCED_FILTERING and bpf_filter:
+            is_valid, message = validate_filter(bpf_filter)
+            if not is_valid:
+                QMessageBox.warning(self, 'Invalid Filter', f'BPF filter validation failed:\n{message}')
+                return
+        
         self.capture_manager.start(interface=interface, bpf_filter=bpf_filter)
-        QMessageBox.information(self, 'Capture Started', f'Capturing on {interface} with filter: {bpf_filter}')
+        # Update dashboard with active filter
+        if hasattr(self.dashboardTab, 'set_active_bpf_filter'):
+            self.dashboardTab.set_active_bpf_filter(bpf_filter)
+        # Disable BPF filter editing during capture
+        if hasattr(self.filterTab, 'filterLineEdit'):
+            self.filterTab.filterLineEdit.setReadOnly(True)
+        if hasattr(self.filterTab, 'applyButton'):
+            self.filterTab.applyButton.setEnabled(False)
+        if hasattr(self.filterTab, 'clearButton'):
+            self.filterTab.clearButton.setEnabled(False)
+        filter_msg = f" with filter: {bpf_filter}" if bpf_filter else ""
+        QMessageBox.information(self, 'Capture Started', f'Capturing on {interface}{filter_msg}')
 
     def stop_capture(self):
         self.capture_manager.stop()
         QMessageBox.information(self, 'Capture Stopped', 'Packet capture stopped.')
+        # Re-enable BPF filter editing after capture
+        if hasattr(self.filterTab, 'filterLineEdit'):
+            self.filterTab.filterLineEdit.setReadOnly(False)
+        if hasattr(self.filterTab, 'applyButton'):
+            self.filterTab.applyButton.setEnabled(True)
+        if hasattr(self.filterTab, 'clearButton'):
+            self.filterTab.clearButton.setEnabled(True)
 
     def apply_filter(self):
-        self.update_live_table()
+        """Apply filter - enhanced version with backward compatibility"""
+        try:
+            # Check if enhanced filtering is available
+            if hasattr(self.filterTab, 'get_current_bpf_filter') and hasattr(self.filterTab, 'get_current_display_filter'):
+                bpf_filter = self.filterTab.get_current_bpf_filter()
+                display_filter = self.filterTab.get_current_display_filter()
+                
+                # Emit the enhanced filter signal
+                if hasattr(self.filterTab, 'filterApplied'):
+                    self.filterTab.filterApplied.emit(bpf_filter, display_filter)
+                else:
+                    # Fallback to manual update
+                    self.update_live_table()
+            else:
+                # Fallback for old filter system
+                self.update_live_table()
+                
+        except Exception as e:
+            print(f"Error applying filter: {e}")
+            self.update_live_table()
 
     def clear_filter(self):
-        self.filterTab.filterLineEdit.clear()
-        self.update_live_table()
+        """Clear filter - enhanced version with backward compatibility"""
+        try:
+            # Check if enhanced filtering is available
+            if hasattr(self.filterTab, 'set_bpf_filter') and hasattr(self.filterTab, 'set_display_filter'):
+                self.filterTab.set_bpf_filter("")
+                self.filterTab.set_display_filter("")
+            elif hasattr(self.filterTab, 'filterLineEdit'):
+                # Fallback for old filter system
+                self.filterTab.filterLineEdit.clear()
+            
+            # Update tables
+            self.update_live_table()
+            
+        except Exception as e:
+            print(f"Error clearing filter: {e}")
+            if hasattr(self.filterTab, 'filterLineEdit'):
+                self.filterTab.filterLineEdit.clear()
+            self.update_live_table()
 
     def _parse_filter(self, filter_str):
         # Enhanced Wireshark-like filter parser
@@ -355,53 +472,76 @@ class NetScopeApp(QMainWindow):
         return None, []
 
     def update_live_table(self):
-        conn = sqlite3.connect('packets.db')
-        cursor = conn.cursor()
-        # Live Capture tab: show all packets
-        cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC')
-        all_rows = cursor.fetchall()
-        self.liveCaptureTab.packetTable.setRowCount(len(all_rows))
-        for row_idx, row in enumerate(all_rows):
-            for col_idx, value in enumerate(row):
-                self.liveCaptureTab.packetTable.setItem(row_idx, col_idx, self.make_table_item(str(value)))
-        # Filter tab: show only filtered packets
-        filter_str = self.filterTab.filterLineEdit.text().strip()
-        sql, params = self._parse_filter(filter_str)
-        if sql:
-            query = f'SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets WHERE {sql} ORDER BY id DESC'
-            cursor.execute(query, params)
-            filter_rows = cursor.fetchall()
-        else:
-            filter_rows = all_rows
-        self.filterTab.filterTable.setRowCount(len(filter_rows))
-        for row_idx, row in enumerate(filter_rows):
-            for col_idx, value in enumerate(row):
-                self.filterTab.filterTable.setItem(row_idx, col_idx, self.make_table_item(str(value)))
-        # --- Dashboard updates ---
-        total_packets = len(all_rows)
-        self.dashboardTab.totalPacketsCard.findChild(QLabel, 'totalPacketsCardValue').setText(str(total_packets))
-        # Packets/sec (calculate from timestamps)
-        from datetime import datetime, timedelta
-        import collections
-        if all_rows:
-            times = [datetime.strptime(r[0], '%Y-%m-%d %H:%M:%S') for r in all_rows]
-            if len(times) > 1:
-                duration = (times[0] - times[-1]).total_seconds() or 1
-                pps = int(len(times) / duration)
-            else:
-                pps = len(times)
-        else:
-            pps = 0
-        self.dashboardTab.packetsSecCard.findChild(QLabel, 'packetsSecCardValue').setText(str(pps))
-        # Threats Detected (placeholder: count rows in ML Alerts table if available)
+        """Update live capture table - enhanced version"""
         try:
-            cursor.execute('SELECT COUNT(*) FROM packets WHERE protocol = "THREAT"')
-            threats = cursor.fetchone()[0]
-        except Exception:
-            threats = 0
-        self.dashboardTab.threatsCard.findChild(QLabel, 'threatsCardValue').setText(str(threats))
-        # Active Filter
-        active_filter = self.filterTab.filterLineEdit.text() or 'All'
+            # Use enhanced live capture refresh if available
+            if hasattr(self.liveCaptureTab, 'refresh_packets'):
+                self.liveCaptureTab.refresh_packets()
+            else:
+                # Fallback to old method
+                conn = sqlite3.connect('packets.db')
+                cursor = conn.cursor()
+                cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC')
+                all_rows = cursor.fetchall()
+                self.liveCaptureTab.packetTable.setRowCount(len(all_rows))
+                for row_idx, row in enumerate(all_rows):
+                    for col_idx, value in enumerate(row):
+                        self.liveCaptureTab.packetTable.setItem(row_idx, col_idx, self.make_table_item(str(value)))
+                conn.close()
+            
+            # Update filter tab if enhanced filtering is available
+            if hasattr(self.filterTab, '_refresh_filtered_table'):
+                self.filterTab._refresh_filtered_table()
+            else:
+                # Fallback to old filter method
+                self._update_old_filter_table()
+                
+        except Exception as e:
+            print(f"Error updating live table: {e}")
+            
+    def _update_old_filter_table(self):
+        """Fallback method for old filter table update"""
+        try:
+            conn = sqlite3.connect('packets.db')
+            cursor = conn.cursor()
+            
+            # Get filter text from appropriate widget
+            filter_str = ""
+            if hasattr(self.filterTab, 'filterLineEdit'):
+                filter_str = self.filterTab.filterLineEdit.text().strip()
+            
+            sql, params = self._parse_filter(filter_str)
+            if sql:
+                query = f'SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets WHERE {sql} ORDER BY id DESC'
+                cursor.execute(query, params)
+                filter_rows = cursor.fetchall()
+            else:
+                cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC')
+                filter_rows = cursor.fetchall()
+                
+            if hasattr(self.filterTab, 'filterTable'):
+                self.filterTab.filterTable.setRowCount(len(filter_rows))
+                for row_idx, row in enumerate(filter_rows):
+                    for col_idx, value in enumerate(row):
+                        self.filterTab.filterTable.setItem(row_idx, col_idx, self.make_table_item(str(value)))
+            
+            conn.close()
+            
+        except Exception as e:
+            print(f"Error updating old filter table: {e}")
+    
+    def _on_packet_selected(self, packet_data):
+        """Handle packet selection from live capture"""
+        try:
+            if hasattr(self.packetDetailsTab, 'show_packet_details'):
+                self.packetDetailsTab.show_packet_details(packet_data)
+            # Switch to packet details tab
+            for i in range(self.tabs.count()):
+                if self.tabs.widget(i) == self.packetDetailsTab:
+                    self.tabs.setCurrentIndex(i)
+                    break
+        except Exception as e:
+            print(f"Error handling packet selection: {e}")
         self.dashboardTab.activeFilterCard.findChild(QLabel, 'activeFilterCardValue').setText(active_filter)
         # --- Live Chart Updates ---
         # 1. Line chart: packets per second over last 60 seconds
@@ -467,13 +607,29 @@ class NetScopeApp(QMainWindow):
     def clear_all_packets(self):
         reply = QMessageBox.question(self, 'Clear All', 'Are you sure you want to delete all captured packets?', QMessageBox.Yes | QMessageBox.No)
         if reply == QMessageBox.Yes:
-            conn = sqlite3.connect('packets.db')
-            cursor = conn.cursor()
-            cursor.execute('DELETE FROM packets')
-            conn.commit()
-            conn.close()
-            self.update_live_table()
-            QMessageBox.information(self, 'Cleared', 'All packets have been deleted.')
+            try:
+                conn = sqlite3.connect('packets.db')
+                cursor = conn.cursor()
+                cursor.execute('DELETE FROM packets')
+                conn.commit()
+                conn.close()
+                
+                # Clear UI tables
+                if hasattr(self.liveCaptureTab, 'clear_packets'):
+                    self.liveCaptureTab.clear_packets()
+                else:
+                    self.liveCaptureTab.packetTable.setRowCount(0)
+                
+                if hasattr(self.filterTab, 'filterTable'):
+                    self.filterTab.filterTable.setRowCount(0)
+                
+                # Update other tables
+                self.update_live_table()
+                
+                QMessageBox.information(self, 'Cleared', 'All packets have been deleted.')
+                
+            except Exception as e:
+                QMessageBox.warning(self, 'Error', f'Failed to clear packets: {str(e)}')
 
     def export_csv(self):
         path, _ = QFileDialog.getSaveFileName(self, 'Export Packets as CSV', '', 'CSV Files (*.csv)')
@@ -798,13 +954,110 @@ class NetScopeApp(QMainWindow):
             dash_layout = self.dashboardTab.layout()
             dash_layout.insertWidget(0, info_panel)
 
-    def show_packet_details(self, row, col):
-        # Get packet data from the selected row in the table
-        table = self.liveCaptureTab.packetTable
-        # Get timestamp and src_ip as unique keys (or use rowid if available)
+    def show_packet_details(self, row, col=None):
+        """Show packet details - enhanced version with backward compatibility"""
+        details = {}
+        
+        try:
+            # Handle direct packet data (from enhanced system)
+            if isinstance(row, dict):
+                packet_data = row
+                details = packet_data
+            else:
+                # Handle old table row selection
+                table = self.liveCaptureTab.packetTable
+                
+                # Check if we have enhanced table with packet data stored
+                if table.item(row, 0) and hasattr(table.item(row, 0), 'data'):
+                    packet_data = table.item(row, 0).data(Qt.UserRole)
+                    if packet_data:
+                        details = packet_data
+                    else:
+                        # Fallback to database lookup
+                        details = self._get_packet_details_from_db(row)
+                else:
+                    # Fallback to database lookup
+                    details = self._get_packet_details_from_db(row)
+                    
+        except Exception as e:
+            print(f"Error getting packet details: {e}")
+            details = self._get_packet_details_from_db(row)
+    
+    def _get_packet_details_from_db(self, row):
+        """Fallback method to get packet details from database"""
+        try:
+            table = self.liveCaptureTab.packetTable
+            timestamp = table.item(row, 1).text() if table.item(row, 1) else ''  # Column 1 is timestamp in enhanced table
+            src_ip = table.item(row, 2).text() if table.item(row, 2) else ''     # Column 2 is src_ip in enhanced table
+            
+            import sqlite3, json
+            conn = sqlite3.connect('packets.db')
+            cursor = conn.cursor()
+            cursor.execute("SELECT details FROM packets WHERE timestamp=? AND src_ip=? LIMIT 1", (timestamp, src_ip))
+            result = cursor.fetchone()
+            details = {}
+            if result and result[0]:
+                try:
+                    details = json.loads(result[0])
+                except Exception:
+                    details = {}
+            conn.close()
+            return details
+            
+        except Exception as e:
+            print(f"Error getting packet details from DB: {e}")
+            return {}
+            
+        # Continue with building protocol tables
+        self._build_packet_details_display(details)
+    
+    def _build_packet_details_display(self, details):
+        """Build the packet details display from packet data"""
+        # Build protocol tables
+        protocol_fields = [
+            ('Ethernet', ['eth_src', 'eth_dst', 'eth_type']),
+            ('IP', ['ip_version', 'ip_ihl', 'ip_tos', 'ip_len', 'ip_id', 'ip_flags', 'ip_frag', 'ip_ttl', 'ip_proto', 'ip_chksum', 'ip_options']),
+            ('TCP', ['tcp_seq', 'tcp_ack', 'tcp_dataofs', 'tcp_reserved', 'tcp_flags', 'tcp_window', 'tcp_chksum', 'tcp_urgptr', 'tcp_options']),
+            ('UDP', ['udp_len', 'udp_chksum']),
+            ('DNS', ['dns_id', 'dns_qr', 'dns_opcode', 'dns_aa', 'dns_tc', 'dns_rd', 'dns_ra', 'dns_z', 'dns_rcode', 'dns_qdcount', 'dns_ancount', 'dns_nscount', 'dns_arcount', 'dns_qd', 'dns_an']),
+            ('ICMP', ['icmp_type', 'icmp_code', 'icmp_chksum', 'icmp_id', 'icmp_seq']),
+            ('ARP', ['arp_hwtype', 'arp_ptype', 'arp_hwlen', 'arp_plen', 'arp_op', 'arp_hwsrc', 'arp_psrc', 'arp_hwdst', 'arp_pdst']),
+            ('HTTP', ['http_data']),
+        ]
+        first_present = None
+        for proto, fields in protocol_fields:
+            field_dict = {f: details[f] for f in fields if f in details}
+            self.packetDetailsTab.populate_protocol_table(proto, field_dict)
+            if field_dict and first_present is None:
+                first_present = proto
+        # Show raw/hex payload if available
+        hex_dump = details.get('raw', '')
+        if hex_dump:
+            try:
+                hex_bytes = bytes.fromhex(hex_dump)
+                hex_lines = []
+                for i in range(0, len(hex_bytes), 16):
+                    chunk = hex_bytes[i:i+16]
+                    hex_part = ' '.join(f'{b:02X}' for b in chunk)
+                    ascii_part = ''.join(chr(b) if 32 <= b < 127 else '.' for b in chunk)
+                    hex_lines.append(f'{i:04X}  {hex_part:<48}  {ascii_part}')
+                self.packetDetailsTab.hexDumpEdit.setPlainText('\n'.join(hex_lines))
+            except Exception:
+                self.packetDetailsTab.hexDumpEdit.setPlainText(hex_dump)
+        else:
+            self.packetDetailsTab.hexDumpEdit.setPlainText('')
+        # Switch to Packet Details tab and show the first present protocol's table
+        if first_present:
+            idx = list(self.packetDetailsTab.protocolTables.keys()).index(first_present) + 1  # +1 for tree view tab
+            self.packetDetailsTab.detailsTabWidget.setCurrentIndex(idx)
+        else:
+            self.packetDetailsTab.detailsTabWidget.setCurrentIndex(0)
+        self.tabs.setCurrentWidget(self.packetDetailsTab)
+
+    def show_filtered_packet_details(self, row, col):
+        table = self.filterTab.filterTable
         timestamp = table.item(row, 0).text() if table.item(row, 0) else ''
         src_ip = table.item(row, 1).text() if table.item(row, 1) else ''
-        # Fetch details JSON from DB for this packet
         import sqlite3, json
         conn = sqlite3.connect('packets.db')
         cursor = conn.cursor()
@@ -817,12 +1070,9 @@ class NetScopeApp(QMainWindow):
             except Exception:
                 details = {}
         conn.close()
-        # Build protocol tree
-        tree = self.packetDetailsTab.protocolTree
-        tree.clear()
-        from PyQt5.QtWidgets import QTreeWidgetItem
-        # Layer order for display
-        layer_fields = [
+        self.packetDetailsTab.clear_details()
+        self.packetDetailsTab.populate_protocol_tree(details)
+        protocol_fields = [
             ('Ethernet', ['eth_src', 'eth_dst', 'eth_type']),
             ('IP', ['ip_version', 'ip_ihl', 'ip_tos', 'ip_len', 'ip_id', 'ip_flags', 'ip_frag', 'ip_ttl', 'ip_proto', 'ip_chksum', 'ip_options']),
             ('TCP', ['tcp_seq', 'tcp_ack', 'tcp_dataofs', 'tcp_reserved', 'tcp_flags', 'tcp_window', 'tcp_chksum', 'tcp_urgptr', 'tcp_options']),
@@ -832,21 +1082,16 @@ class NetScopeApp(QMainWindow):
             ('ARP', ['arp_hwtype', 'arp_ptype', 'arp_hwlen', 'arp_plen', 'arp_op', 'arp_hwsrc', 'arp_psrc', 'arp_hwdst', 'arp_pdst']),
             ('HTTP', ['http_data']),
         ]
-        for layer, fields in layer_fields:
-            layer_present = any(f in details for f in fields)
-            if layer_present:
-                layer_item = QTreeWidgetItem([layer])
-                for f in fields:
-                    if f in details:
-                        QTreeWidgetItem(layer_item, [f"{f}: {details[f]}"])
-                tree.addTopLevelItem(layer_item)
-        # Show raw/hex payload if available
+        first_present = None
+        for proto, fields in protocol_fields:
+            field_dict = {f: details[f] for f in fields if f in details}
+            self.packetDetailsTab.populate_protocol_table(proto, field_dict)
+            if field_dict and first_present is None:
+                first_present = proto
         hex_dump = details.get('raw', '')
         if hex_dump:
             try:
-                # Show as hex and ASCII
                 hex_bytes = bytes.fromhex(hex_dump)
-                ascii_str = ''.join(chr(b) if 32 <= b < 127 else '.' for b in hex_bytes)
                 hex_lines = []
                 for i in range(0, len(hex_bytes), 16):
                     chunk = hex_bytes[i:i+16]
@@ -858,7 +1103,11 @@ class NetScopeApp(QMainWindow):
                 self.packetDetailsTab.hexDumpEdit.setPlainText(hex_dump)
         else:
             self.packetDetailsTab.hexDumpEdit.setPlainText('')
-        # Switch to Packet Details tab
+        if first_present:
+            idx = list(self.packetDetailsTab.protocolTables.keys()).index(first_present) + 1
+            self.packetDetailsTab.detailsTabWidget.setCurrentIndex(idx)
+        else:
+            self.packetDetailsTab.detailsTabWidget.setCurrentIndex(0)
         self.tabs.setCurrentWidget(self.packetDetailsTab)
 
     def show_filtered_packet_details(self, row, col):
@@ -1058,6 +1307,73 @@ class NetScopeApp(QMainWindow):
             self.update_statistics_tab()
 
 # Entry point
+    def _init_enhanced_database(self):
+        """Initialize database with enhanced schema"""
+        try:
+            conn = sqlite3.connect('packets.db')
+            cursor = conn.cursor()
+            
+            # Create enhanced table schema with indexes
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS packets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME NOT NULL,
+                    src_ip TEXT NOT NULL,
+                    dst_ip TEXT NOT NULL,
+                    protocol TEXT NOT NULL,
+                    src_port INTEGER,
+                    dst_port INTEGER,
+                    size INTEGER NOT NULL,
+                    details TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            
+            # Create indexes for better query performance
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON packets(timestamp)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip ON packets(src_ip)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dst_ip ON packets(dst_ip)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_protocol ON packets(protocol)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_port ON packets(src_port)')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_dst_port ON packets(dst_port)')
+            
+            # Clear existing packets on startup
+            cursor.execute('DELETE FROM packets')
+            
+            conn.commit()
+            conn.close()
+            print("Enhanced database initialized successfully")
+            
+        except Exception as e:
+            print(f"Error initializing database: {e}")
+            # Fallback to basic initialization
+            conn = sqlite3.connect('packets.db')
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM packets')
+            conn.commit()
+            conn.close()
+            
+    def _on_filter_applied(self, bpf_filter, display_filter):
+        """Handle filter application from filter tab"""
+        if bpf_filter:
+            # BPF filter applied - restart capture with new filter
+            if self.capture_manager and hasattr(self.capture_manager, 'is_running') and self.capture_manager.is_running:
+                self.stop_capture()
+                QMessageBox.information(self, 'Filter Applied', 
+                    'Capture stopped. Click Start to begin capturing with new BPF filter.')
+        
+        if display_filter:
+            # Display filter applied - refresh filter table
+            self._refresh_display_filter()
+            
+    def _refresh_display_filter(self):
+        """Refresh display filter results"""
+        try:
+            if hasattr(self.filterTab, '_refresh_filtered_table'):
+                self.filterTab._refresh_filtered_table()
+        except Exception as e:
+            print(f"Error refreshing display filter: {e}")
+
 def main():
     app = QApplication(sys.argv)
     window = NetScopeApp()

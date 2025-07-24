@@ -7,20 +7,30 @@ import json
 conn = sqlite3.connect('packets.db')
 cursor = conn.cursor()
 
-# Create table if it doesn't exist
+# Create improved table schema with indexes (consistent with packet_sniffer.py)
 cursor.execute('''
     CREATE TABLE IF NOT EXISTS packets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        timestamp TEXT,
-        src_ip TEXT,
-        dst_ip TEXT,
-        protocol TEXT,
-        src_port TEXT,
-        dst_port TEXT,
-        size INTEGER,
-        details TEXT
+        timestamp DATETIME NOT NULL,
+        src_ip TEXT NOT NULL,
+        dst_ip TEXT NOT NULL,
+        protocol TEXT NOT NULL,
+        src_port INTEGER,
+        dst_port INTEGER,
+        size INTEGER NOT NULL,
+        details TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
 ''')
+
+# Create indexes for better query performance
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_timestamp ON packets(timestamp)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_ip ON packets(src_ip)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_dst_ip ON packets(dst_ip)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_protocol ON packets(protocol)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_port ON packets(src_port)')
+cursor.execute('CREATE INDEX IF NOT EXISTS idx_dst_port ON packets(dst_port)')
+
 conn.commit()
 
 def store_packet(packet):
@@ -122,9 +132,14 @@ def store_packet(packet):
             pass
     timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
     size = len(packet)
+    
+    # Convert ports to integers, handle None values
+    src_port_int = int(src_port) if src_port and src_port.isdigit() else None
+    dst_port_int = int(dst_port) if dst_port and dst_port.isdigit() else None
+    
     cursor.execute(
         "INSERT INTO packets (timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (timestamp, src, dst, proto_name, src_port, dst_port, size, json.dumps(details))
+        (timestamp, src, dst, proto_name, src_port_int, dst_port_int, size, json.dumps(details))
     )
     conn.commit()
 
