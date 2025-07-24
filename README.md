@@ -2,6 +2,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![PyQt5](https://img.shields.io/badge/UI-PyQt5-green.svg)](https://pypi.org/project/PyQt5/)
+[![Scapy](https://img.shields.io/badge/Network-Scapy-red.svg)](https://scapy.net/)
 
 ## Overview
 PyGuard is a modern Python desktop application for real-time network packet capture, storage, analysis, and host-based intrusion detection using machine learning. Built with PyQt5, it provides an interactive GUI for live monitoring, filtering, protocol inspection, statistics, and ML-driven threat alerts—all in one place.
@@ -63,7 +65,7 @@ pyguard trial/
 3. **Install dependencies:**
    ```powershell
    pip install -r netscope/backend/requirements.txt
-   pip install pyqt5 scapy pyqtgraph numpy
+   pip install pyqt5 scapy pyqtgraph numpy scikit-learn
    ```
 4. **Run the desktop app:**
    ```powershell
@@ -80,6 +82,13 @@ Contributions are welcome! Please open issues or pull requests. See [CONTRIBUTIN
 
 ## License
 MIT License
+
+## Contact
+- Project Maintainer: [Maitrik Makwana](https://github.com/MaitrikMakwana)
+- Project Website: [https://github.com/MaitrikMakwana/PyGuard](https://github.com/MaitrikMakwana/PyGuard)
+
+## Screenshots
+Coming soon!
 
 ## Technology Stack
 
