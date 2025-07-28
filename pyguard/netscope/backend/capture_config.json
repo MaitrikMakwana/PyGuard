@@ -1,0 +1,44 @@
+{
+    "interfaces": ["eth0"],
+    "bpf_filter": "ip",
+    "max_packets": 0,
+    "duration": 0,
+    "output_dir": "captures",
+    "output_base": "packets",
+    "db_path": "packets.db",
+    "flush_interval": 10,
+    "max_file_size": 100,
+    "rotation_interval": 3600,
+    "sample_rate": 1,
+    "formats": ["json", "csv"],
+    
+    "comments": {
+        "interfaces": "List of network interfaces to capture on (e.g., eth0, wlan0)",
+        "bpf_filter": "BPF filter expression (e.g., 'tcp port 80', 'udp port 53')",
+        "max_packets": "Maximum number of packets to capture (0 for infinite)",
+        "duration": "Maximum duration in seconds (0 for infinite)",
+        "output_dir": "Directory for output files",
+        "output_base": "Base filename for output files",
+        "db_path": "Path to SQLite database file",
+        "flush_interval": "Interval in seconds to flush data to disk",
+        "max_file_size": "Maximum file size in MB before rotation",
+        "rotation_interval": "Time interval in seconds before file rotation",
+        "sample_rate": "Packet sampling rate (1 = all packets, 2 = every other packet, etc.)",
+        "formats": "Output formats (json, csv)"
+    },
+    
+    "preset_filters": {
+        "web_traffic": "tcp and (port 80 or port 443 or port 8080)",
+        "dns_traffic": "udp and port 53",
+        "email_traffic": "tcp and (port 25 or port 110 or port 143 or port 993 or port 995)",
+        "ssh_traffic": "tcp and port 22",
+        "ftp_traffic": "tcp and (port 20 or port 21)",
+        "dhcp_traffic": "udp and (port 67 or port 68)",
+        "icmp_traffic": "icmp",
+        "arp_traffic": "arp",
+        "large_packets": "len > 1000",
+        "small_packets": "len < 64",
+        "tcp_syn": "tcp and tcp[tcpflags] & tcp-syn != 0",
+        "tcp_rst": "tcp and tcp[tcpflags] & tcp-rst != 0"
+    }
+}

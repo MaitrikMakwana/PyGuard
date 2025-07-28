@@ -5,6 +5,21 @@ import pyqtgraph as pg
 import sqlite3
 import json
 import time
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
+
+class PieChartCanvas(FigureCanvas):
+    def __init__(self, parent=None):
+        fig = Figure(figsize=(3, 3), dpi=100)
+        self.axes = fig.add_subplot(111)
+        super().__init__(fig)
+        self.setParent(parent)
+
+    def plot(self, labels, values, colors):
+        self.axes.clear()
+        self.axes.pie(values, labels=labels, colors=colors, autopct='%1.1f%%')
+        self.axes.set_title('Protocol Distribution', color='#B0B0B0', fontsize=16)
+        self.draw()
 
 class DashboardTab(QWidget):
     def __init__(self, parent=None):
@@ -122,13 +137,9 @@ class DashboardTab(QWidget):
         self.packetsLineChart.setTitle('Live Packets Over Time', color='#B0B0B0', size='16pt')
         self.packetsLineChart.getAxis('left').setPen(pg.mkPen(color='#B0B0B0'))
         self.packetsLineChart.getAxis('bottom').setPen(pg.mkPen(color='#B0B0B0'))
-        self.protocolPieChart = pg.PlotWidget()
-        self.protocolPieChart.setBackground('w')
+        self.protocolPieChart = PieChartCanvas(self)
         self.protocolPieChart.setStyleSheet('background: transparent; border-radius: 24px;')
         self.protocolPieChart.setMinimumHeight(260)
-        self.protocolPieChart.setTitle('Protocol Distribution', color='#B0B0B0', size='16pt')
-        self.protocolPieChart.getAxis('left').setPen(pg.mkPen(color='#B0B0B0'))
-        self.protocolPieChart.getAxis('bottom').setPen(pg.mkPen(color='#B0B0B0'))
         chart_row.addWidget(self.packetsLineChart)
         chart_row.addWidget(self.protocolPieChart)
         main_layout.addWidget(charts_card)
@@ -196,6 +207,34 @@ class DashboardTab(QWidget):
                 self.recentPacketInfo.setText(info)
             else:
                 self.recentPacketInfo.setText('-')
+
+            # --- Line Chart: Packets Over Time (last 60 seconds) ---
+            now = int(time.time())
+            window = 60  # seconds
+            x = list(range(now - window + 1, now + 1))
+            y = []
+            for t in x:
+                t_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))
+                cursor.execute(
+                    "SELECT COUNT(*) FROM packets WHERE timestamp = ?", (t_str,)
+                )
+                count = cursor.fetchone()[0]
+                y.append(count)
+            self.update_line_chart(x, y)
+
+            # --- Pie Chart: Protocol Distribution (last 60 seconds) ---
+            cursor.execute(
+                "SELECT protocol, COUNT(*) FROM packets WHERE strftime('%s', timestamp) >= ? GROUP BY protocol",
+                (str(now - window),)
+            )
+            results = cursor.fetchall()
+            labels = [row[0] for row in results]
+            values = [row[1] for row in results]
+            # Assign colors (repeat if needed)
+            color_palette = ['#1976D2', '#00BCD4', '#FF9800', '#E91E63', '#4CAF50', '#9C27B0']
+            colors = [color_palette[i % len(color_palette)] for i in range(len(labels))]
+            self.update_pie_chart(labels, values, colors)
+
             conn.close()
         except Exception as e:
             self.recentPacketInfo.setText(f'Error: {e}')
@@ -205,20 +244,10 @@ class DashboardTab(QWidget):
         self.packetsLineChart.plot(x, y, pen=pg.mkPen('#1976D2', width=3))
 
     def update_pie_chart(self, labels, values, colors):
-        self.protocolPieChart.clear()
-        import numpy as np
-        total = sum(values)
-        angles = np.cumsum([0] + [v/total*360 for v in values])
-        for i, (label, value, color) in enumerate(zip(labels, values, colors)):
-            theta1, theta2 = angles[i], angles[i+1]
-            pie = pg.QtGui.QGraphicsEllipseItem(-100, -100, 200, 200)
-            pie.setStartAngle(int(theta1*16))
-            pie.setSpanAngle(int((theta2-theta1)*16))
-            pie.setBrush(pg.mkBrush(color))
-            self.protocolPieChart.addItem(pie)
+        self.protocolPieChart.plot(labels, values, colors)
 
     def set_active_bpf_filter(self, bpf_filter):
         if bpf_filter:
             self.activeFilterValue.setText(bpf_filter)
         else:
-            self.activeFilterValue.setText('All') 
+            self.activeFilterValue.setText('All')

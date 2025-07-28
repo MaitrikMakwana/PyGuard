@@ -982,6 +982,14 @@ class NetScopeApp(QMainWindow):
         except Exception as e:
             print(f"Error getting packet details: {e}")
             details = self._get_packet_details_from_db(row)
+        
+        # Display the packet details using the new method if available
+        if hasattr(self.packetDetailsTab, 'show_packet_details'):
+            self.packetDetailsTab.show_packet_details(details)
+            self.tabs.setCurrentWidget(self.packetDetailsTab)
+        else:
+            # Fallback to old method
+            self._build_packet_details_display(details)
     
     def _get_packet_details_from_db(self, row):
         """Fallback method to get packet details from database"""
@@ -1007,26 +1015,30 @@ class NetScopeApp(QMainWindow):
         except Exception as e:
             print(f"Error getting packet details from DB: {e}")
             return {}
-            
-        # Continue with building protocol tables
-        self._build_packet_details_display(details)
     
     def _build_packet_details_display(self, details):
         """Build the packet details display from packet data"""
-        # Build protocol tables
+        # Build protocol tables with expanded field lists
         protocol_fields = [
             ('Ethernet', ['eth_src', 'eth_dst', 'eth_type']),
             ('IP', ['ip_version', 'ip_ihl', 'ip_tos', 'ip_len', 'ip_id', 'ip_flags', 'ip_frag', 'ip_ttl', 'ip_proto', 'ip_chksum', 'ip_options']),
-            ('TCP', ['tcp_seq', 'tcp_ack', 'tcp_dataofs', 'tcp_reserved', 'tcp_flags', 'tcp_window', 'tcp_chksum', 'tcp_urgptr', 'tcp_options']),
+            ('TCP', ['tcp_seq', 'tcp_ack', 'tcp_dataofs', 'tcp_reserved', 'tcp_flags_raw', 'tcp_window', 'tcp_chksum', 'tcp_urgptr', 'tcp_options']),
             ('UDP', ['udp_len', 'udp_chksum']),
-            ('DNS', ['dns_id', 'dns_qr', 'dns_opcode', 'dns_aa', 'dns_tc', 'dns_rd', 'dns_ra', 'dns_z', 'dns_rcode', 'dns_qdcount', 'dns_ancount', 'dns_nscount', 'dns_arcount', 'dns_qd', 'dns_an']),
-            ('ICMP', ['icmp_type', 'icmp_code', 'icmp_chksum', 'icmp_id', 'icmp_seq']),
-            ('ARP', ['arp_hwtype', 'arp_ptype', 'arp_hwlen', 'arp_plen', 'arp_op', 'arp_hwsrc', 'arp_psrc', 'arp_hwdst', 'arp_pdst']),
-            ('HTTP', ['http_data']),
+            ('DNS', ['dns_id', 'dns_qr', 'dns_opcode', 'dns_aa', 'dns_tc', 'dns_rd', 'dns_ra', 'dns_z', 'dns_rcode', 'dns_qdcount', 'dns_ancount', 'dns_nscount', 'dns_arcount', 'dns_qd', 'dns_an', 'dns_qname', 'dns_qtype', 'dns_qclass', 'dns_type', 'dns_an_name', 'dns_an_type', 'dns_an_rdata', 'dns_an_ttl']),
+            ('ICMP', ['icmp_type', 'icmp_code', 'icmp_chksum', 'icmp_id', 'icmp_seq', 'icmp_type_name']),
+            ('ARP', ['arp_hwtype', 'arp_ptype', 'arp_hwlen', 'arp_plen', 'arp_op', 'arp_op_name', 'arp_hwsrc', 'arp_psrc', 'arp_hwdst', 'arp_pdst']),
+            ('HTTP', ['http_data', 'http_method', 'http_uri', 'http_version', 'http_headers']),
         ]
+        
         first_present = None
         for proto, fields in protocol_fields:
             field_dict = {f: details[f] for f in fields if f in details}
+            
+            # Add TCP flags to TCP table if present
+            if proto == 'TCP' and 'tcp_flags' in details and isinstance(details['tcp_flags'], dict):
+                for flag, value in details['tcp_flags'].items():
+                    field_dict[f'Flag {flag}'] = value
+            
             self.packetDetailsTab.populate_protocol_table(proto, field_dict)
             if field_dict and first_present is None:
                 first_present = proto
@@ -1070,24 +1082,40 @@ class NetScopeApp(QMainWindow):
             except Exception:
                 details = {}
         conn.close()
-        self.packetDetailsTab.clear_details()
-        self.packetDetailsTab.populate_protocol_tree(details)
-        protocol_fields = [
-            ('Ethernet', ['eth_src', 'eth_dst', 'eth_type']),
-            ('IP', ['ip_version', 'ip_ihl', 'ip_tos', 'ip_len', 'ip_id', 'ip_flags', 'ip_frag', 'ip_ttl', 'ip_proto', 'ip_chksum', 'ip_options']),
-            ('TCP', ['tcp_seq', 'tcp_ack', 'tcp_dataofs', 'tcp_reserved', 'tcp_flags', 'tcp_window', 'tcp_chksum', 'tcp_urgptr', 'tcp_options']),
-            ('UDP', ['udp_len', 'udp_chksum']),
-            ('DNS', ['dns_id', 'dns_qr', 'dns_opcode', 'dns_aa', 'dns_tc', 'dns_rd', 'dns_ra', 'dns_z', 'dns_rcode', 'dns_qdcount', 'dns_ancount', 'dns_nscount', 'dns_arcount', 'dns_qd', 'dns_an']),
-            ('ICMP', ['icmp_type', 'icmp_code', 'icmp_chksum', 'icmp_id', 'icmp_seq']),
-            ('ARP', ['arp_hwtype', 'arp_ptype', 'arp_hwlen', 'arp_plen', 'arp_op', 'arp_hwsrc', 'arp_psrc', 'arp_hwdst', 'arp_pdst']),
-            ('HTTP', ['http_data']),
-        ]
-        first_present = None
-        for proto, fields in protocol_fields:
-            field_dict = {f: details[f] for f in fields if f in details}
-            self.packetDetailsTab.populate_protocol_table(proto, field_dict)
-            if field_dict and first_present is None:
-                first_present = proto
+        
+        # Display the packet details using the new method if available
+        if hasattr(self.packetDetailsTab, 'show_packet_details'):
+            self.packetDetailsTab.show_packet_details(details)
+            self.tabs.setCurrentWidget(self.packetDetailsTab)
+        else:
+            # Fallback to old method
+            self.packetDetailsTab.clear_details()
+            self.packetDetailsTab.populate_protocol_tree(details)
+            
+            # Use the same expanded field lists as in _build_packet_details_display
+            protocol_fields = [
+                ('Ethernet', ['eth_src', 'eth_dst', 'eth_type']),
+                ('IP', ['ip_version', 'ip_ihl', 'ip_tos', 'ip_len', 'ip_id', 'ip_flags', 'ip_frag', 'ip_ttl', 'ip_proto', 'ip_chksum', 'ip_options']),
+                ('TCP', ['tcp_seq', 'tcp_ack', 'tcp_dataofs', 'tcp_reserved', 'tcp_flags_raw', 'tcp_window', 'tcp_chksum', 'tcp_urgptr', 'tcp_options']),
+                ('UDP', ['udp_len', 'udp_chksum']),
+                ('DNS', ['dns_id', 'dns_qr', 'dns_opcode', 'dns_aa', 'dns_tc', 'dns_rd', 'dns_ra', 'dns_z', 'dns_rcode', 'dns_qdcount', 'dns_ancount', 'dns_nscount', 'dns_arcount', 'dns_qd', 'dns_an', 'dns_qname', 'dns_qtype', 'dns_qclass', 'dns_type', 'dns_an_name', 'dns_an_type', 'dns_an_rdata', 'dns_an_ttl']),
+                ('ICMP', ['icmp_type', 'icmp_code', 'icmp_chksum', 'icmp_id', 'icmp_seq', 'icmp_type_name']),
+                ('ARP', ['arp_hwtype', 'arp_ptype', 'arp_hwlen', 'arp_plen', 'arp_op', 'arp_op_name', 'arp_hwsrc', 'arp_psrc', 'arp_hwdst', 'arp_pdst']),
+                ('HTTP', ['http_data', 'http_method', 'http_uri', 'http_version', 'http_headers']),
+            ]
+            
+            first_present = None
+            for proto, fields in protocol_fields:
+                field_dict = {f: details[f] for f in fields if f in details}
+                
+                # Add TCP flags to TCP table if present
+                if proto == 'TCP' and 'tcp_flags' in details and isinstance(details['tcp_flags'], dict):
+                    for flag, value in details['tcp_flags'].items():
+                        field_dict[f'Flag {flag}'] = value
+                
+                self.packetDetailsTab.populate_protocol_table(proto, field_dict)
+                if field_dict and first_present is None:
+                    first_present = proto
         hex_dump = details.get('raw', '')
         if hex_dump:
             try:
