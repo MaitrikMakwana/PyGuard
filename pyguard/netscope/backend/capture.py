@@ -1,8 +1,17 @@
 import threading
 import time
-from scapy.all import sniff, Ether, IP, TCP, UDP, ICMP, ARP, DNS, Raw
-import sqlite3
+import os
 import json
+import csv
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Callable
+
+from scapy.all import sniff, Ether, IP, TCP, UDP, ICMP, ARP, DNS, Raw, get_if_list
+import sqlite3
+
+# Import the enhanced packet capture module
+from .enhanced_packet_capture import EnhancedPacketCapture, PacketProcessor
 
 class CaptureManager:
     def __init__(self, db_path='packets.db'):
@@ -15,6 +24,14 @@ class CaptureManager:
         self.interface = None
         self.bpf_filter = None
         self.packet_callback = None  # Optional: function to call with each packet (for UI updates)
+        
+        # Enhanced capture support
+        self.enhanced_mode = False
+        self.enhanced_capture = None
+        self.packet_processor = PacketProcessor()
+        self.export_formats = ['json', 'csv']
+        self.export_dir = 'captures'
+        self.export_base = 'packets'
 
     def _ensure_table(self):
         # Create improved table schema with indexes (consistent with packet_sniffer.py)
@@ -41,23 +58,102 @@ class CaptureManager:
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_src_port ON packets(src_port)')
         self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_dst_port ON packets(dst_port)')
         
+        # Create enhanced table schema with additional fields for TCP flags and payload length
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS enhanced_packets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME NOT NULL,
+                src_ip TEXT NOT NULL,
+                dst_ip TEXT NOT NULL,
+                protocol TEXT NOT NULL,
+                src_port INTEGER,
+                dst_port INTEGER,
+                packet_length INTEGER NOT NULL,
+                payload_length INTEGER,
+                tcp_flags_syn INTEGER,
+                tcp_flags_ack INTEGER,
+                tcp_flags_fin INTEGER,
+                tcp_flags_rst INTEGER,
+                tcp_flags_psh INTEGER,
+                tcp_flags_urg INTEGER,
+                details TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Create indexes for enhanced table
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_enh_timestamp ON enhanced_packets(timestamp)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_enh_src_ip ON enhanced_packets(src_ip)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_enh_dst_ip ON enhanced_packets(dst_ip)')
+        self.cursor.execute('CREATE INDEX IF NOT EXISTS idx_enh_protocol ON enhanced_packets(protocol)')
+        
         self.conn.commit()
 
-    def start(self, interface=None, bpf_filter=None, packet_callback=None):
+    def start(self, interface=None, bpf_filter=None, packet_callback=None, enhanced_mode=False, 
+              export_formats=None, export_dir=None, export_base=None):
+        """
+        Start packet capture with enhanced options
+        
+        Args:
+            interface: Network interface to capture on
+            bpf_filter: BPF filter expression
+            packet_callback: Callback function for UI updates
+            enhanced_mode: Whether to use enhanced capture mode
+            export_formats: List of export formats (json, csv)
+            export_dir: Directory for export files
+            export_base: Base filename for export files
+        """
         self.interface = interface
         self.bpf_filter = bpf_filter
         self.packet_callback = packet_callback
+        self.enhanced_mode = enhanced_mode
+        
+        if export_formats:
+            self.export_formats = export_formats
+        if export_dir:
+            self.export_dir = export_dir
+        if export_base:
+            self.export_base = export_base
+        
+        # Create export directory if it doesn't exist
+        if self.enhanced_mode and self.export_dir:
+            os.makedirs(self.export_dir, exist_ok=True)
+        
         self.running = True
-        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self.thread.start()
+        
+        if self.enhanced_mode:
+            # Use enhanced capture mode
+            config = {
+                'interfaces': [self.interface] if self.interface else get_if_list(),
+                'bpf_filter': self.bpf_filter,
+                'output_dir': self.export_dir,
+                'output_base': self.export_base,
+                'db_path': self.db_path,
+                'formats': self.export_formats
+            }
+            
+            self.enhanced_capture = EnhancedPacketCapture(config)
+            self.enhanced_capture.start()
+        else:
+            # Use legacy capture mode
+            self.thread = threading.Thread(target=self._capture_loop, daemon=True)
+            self.thread.start()
 
     def stop(self):
+        """Stop packet capture"""
         self.running = False
-        if self.thread:
+        
+        if self.enhanced_mode and self.enhanced_capture:
+            # Stop enhanced capture
+            self.enhanced_capture.stop()
+            self.enhanced_capture = None
+        elif self.thread:
+            # Stop legacy capture
             self.thread.join(timeout=2)
             self.thread = None
 
     def _capture_loop(self):
+        """Legacy capture loop"""
         try:
             sniff(
                 iface=self.interface,
@@ -70,6 +166,7 @@ class CaptureManager:
             print(f"Capture error: {e}")
 
     def _handle_packet(self, packet):
+        """Legacy packet handler"""
         details = {}
         proto_name = "OTHER"
         src = dst = src_port = dst_port = "-"
@@ -188,4 +285,79 @@ class CaptureManager:
                 'dst_port': dst_port,
                 'size': size,
                 'details': details
-            }) 
+            })
+    
+    def export_packets(self, query=None, format='csv', filename=None):
+        """
+        Export packets to CSV or JSON
+        
+        Args:
+            query: SQL query to filter packets (None for all)
+            format: Export format ('csv' or 'json')
+            filename: Output filename (None for auto-generated)
+            
+        Returns:
+            Path to the exported file
+        """
+        if not filename:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{self.export_base}_{timestamp}.{format}"
+            
+        filepath = os.path.join(self.export_dir, filename)
+        
+        # Create directory if it doesn't exist
+        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Default query to get all packets
+        if not query:
+            query = "SELECT * FROM packets ORDER BY timestamp"
+        
+        try:
+            # Execute query
+            self.cursor.execute(query)
+            rows = self.cursor.fetchall()
+            
+            # Get column names
+            columns = [description[0] for description in self.cursor.description]
+            
+            if format.lower() == 'csv':
+                with open(filepath, 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    # Write header
+                    writer.writerow(columns)
+                    # Write data
+                    writer.writerows(rows)
+            
+            elif format.lower() == 'json':
+                # Convert to list of dictionaries
+                result = []
+                for row in rows:
+                    row_dict = {}
+                    for i, col in enumerate(columns):
+                        # Parse details JSON if present
+                        if col == 'details' and row[i]:
+                            try:
+                                row_dict[col] = json.loads(row[i])
+                            except:
+                                row_dict[col] = row[i]
+                        else:
+                            row_dict[col] = row[i]
+                    result.append(row_dict)
+                
+                # Write JSON file
+                with open(filepath, 'w') as jsonfile:
+                    json.dump(result, jsonfile, indent=2)
+            
+            return filepath
+            
+        except Exception as e:
+            print(f"Export error: {e}")
+            return None
+    
+    def get_available_interfaces(self):
+        """Get list of available network interfaces"""
+        try:
+            return get_if_list()
+        except Exception as e:
+            print(f"Error getting interfaces: {e}")
+            return []
