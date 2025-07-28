@@ -15,8 +15,15 @@ PyGuard is a modern Python desktop application for real-time network packet capt
 - **Wireshark-like summary and detailed inspection**
 - **ML-based intrusion detection** (host-based, supports scikit-learn models)
 - **Interactive desktop GUI** (PyQt5)
-- **Live statistics, filtering, and export/import (CSV/PCAP)**
+- **Live statistics, filtering, and export/import (CSV/PCAP/JSON)**
 - **Modular, extensible codebase**
+- **Enhanced packet capture and export** (JSON/CSV with file rotation)
+  - Multi-interface support
+  - Configurable BPF filters
+  - Detailed field extraction (TCP flags, payload length, etc.)
+  - Asynchronous I/O for performance
+  - File rotation by size or time interval
+  - Packet sampling for high-volume traffic
 
 ## File Structure
 ```
@@ -25,12 +32,16 @@ pyguard trial/
 ├── netscope/
 │   ├── app.py               # Main PyQt5 desktop application (entry point)
 │   ├── backend/
-│   │   ├── capture.py       # Packet capture logic
-│   │   ├── packet_sniffer.py# Scapy-based sniffer
-│   │   ├── packets.py       # Packet data models/utilities
-│   │   ├── view_packets.py  # CLI packet viewer
-│   │   ├── requirements.txt # Backend dependencies
-│   │   └── packets.db       # SQLite database (auto-created)
+│   │   ├── capture.py                # Packet capture logic
+│   │   ├── packet_sniffer.py         # Scapy-based sniffer
+│   │   ├── enhanced_packet_capture.py# Enhanced capture module
+│   │   ├── capture_config.json       # Capture configuration
+│   │   ├── capture_example.py        # Example usage script
+│   │   ├── packets.py                # Packet data models/utilities
+│   │   ├── view_packets.py           # CLI packet viewer
+│   │   ├── requirements.txt          # Backend dependencies
+│   │   ├── ENHANCED_CAPTURE_README.md# Enhanced capture documentation
+│   │   └── packets.db                # SQLite database (auto-created)
 │   ├── ui/
 │   │   ├── dashboard_tab.py # Dashboard UI
 │   │   ├── live_capture_tab.py # Live capture UI
