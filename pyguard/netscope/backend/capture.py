@@ -16,9 +16,49 @@ from .enhanced_packet_capture import EnhancedPacketCapture, PacketProcessor
 class CaptureManager:
     def __init__(self, db_path='packets.db'):
         self.db_path = db_path
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._connection_pool = []
+        self._max_pool_size = 3  # Maximum number of connections in the pool
+        
+        # Get initial connection and create tables
+        self.conn = self._get_connection()
         self.cursor = self.conn.cursor()
         self._ensure_table()
+        
+        self.thread = None
+        self.running = False
+        self.interface = None
+        self.bpf_filter = None
+        self.packet_callback = None  # Optional: function to call with each packet (for UI updates)
+        
+    def _get_connection(self):
+        """Get a database connection from the pool or create a new one"""
+        if self._connection_pool:
+            return self._connection_pool.pop()
+        
+        # Create a new connection with optimized settings
+        conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.execute('PRAGMA journal_mode = WAL')  # Use Write-Ahead Logging
+        conn.execute('PRAGMA synchronous = NORMAL')  # Reduce synchronous writes
+        conn.execute('PRAGMA cache_size = -10000')  # ~10MB cache
+        return conn
+    
+    def _return_connection(self, conn):
+        """Return a connection to the pool"""
+        if len(self._connection_pool) < self._max_pool_size:
+            self._connection_pool.append(conn)
+        else:
+            conn.close()
+    
+    def __init__(self, db_path='packets.db'):
+        self.db_path = db_path
+        self._connection_pool = []
+        self._max_pool_size = 3  # Maximum number of connections in the pool
+        
+        # Get initial connection and create tables
+        self.conn = self._get_connection()
+        self.cursor = self.conn.cursor()
+        self._ensure_table()
+        
         self.thread = None
         self.running = False
         self.interface = None
@@ -153,17 +193,91 @@ class CaptureManager:
             self.thread = None
 
     def _capture_loop(self):
-        """Legacy capture loop"""
-        try:
-            sniff(
-                iface=self.interface,
-                filter=self.bpf_filter,
-                prn=self._handle_packet,
-                store=False,
-                stop_filter=lambda x: not self.running
-            )
-        except Exception as e:
-            print(f"Capture error: {e}")
+        """Legacy capture loop with improved error handling"""
+        max_retries = 3
+        retry_count = 0
+        backoff_time = 1  # Start with 1 second backoff
+        
+        while self.running and retry_count < max_retries:
+            try:
+                # Log capture start
+                print(f"Starting packet capture on interface {self.interface} with filter: {self.bpf_filter}")
+                
+                # Set a packet count limit to prevent memory issues
+                packet_count = 0
+                max_packets_per_session = 1000  # Increased limit for better performance
+                
+                # Use sampling for high-traffic networks
+                sample_rate = 1  # Process every packet by default
+                
+                def packet_handler(pkt):
+                    nonlocal packet_count, sample_rate
+                    packet_count += 1
+                    
+                    # If we've captured too many packets, restart the capture
+                    if packet_count >= max_packets_per_session:
+                        print(f"Reached packet limit ({max_packets_per_session}), restarting capture")
+                        return True  # Stop the current capture
+                    
+                    # Implement adaptive sampling based on traffic volume
+                    if packet_count % 100 == 0:
+                        # Check if we're getting too many packets too quickly
+                        if packet_count > 200 and (time.time() - capture_start_time) < 5:
+                            # High traffic detected, increase sampling rate
+                            sample_rate = min(sample_rate * 2, 10)  # Max sample every 10th packet
+                            print(f"High traffic detected, sampling every {sample_rate}th packet")
+                    
+                    # Process the packet (with sampling)
+                    if packet_count % sample_rate == 0:
+                        self._handle_packet(pkt)
+                    
+                    # Check if we should stop
+                    return not self.running
+                
+                # Record start time for adaptive sampling
+                capture_start_time = time.time()
+                
+                # Start capture with improved handling
+                sniff(
+                    iface=self.interface,
+                    filter=self.bpf_filter,
+                    prn=packet_handler,
+                    store=False,
+                    stop_filter=lambda x: packet_count >= max_packets_per_session or not self.running
+                )
+                
+                # If we get here and we're still running, it means we hit the packet limit
+                # So we'll loop and start a new capture session
+                if self.running and packet_count >= max_packets_per_session:
+                    print("Restarting capture session")
+                    continue
+                
+                # If we get here and we're not running, it means stop() was called
+                break
+                
+            except MemoryError:
+                # Handle memory errors specifically
+                print(f"Memory error during capture. Retrying in {backoff_time} seconds...")
+                retry_count += 1
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
+                
+                # Wait before retry with exponential backoff
+                time.sleep(backoff_time)
+                backoff_time *= 2
+                
+            except Exception as e:
+                print(f"Capture error: {e}. Retrying in {backoff_time} seconds...")
+                retry_count += 1
+                
+                # Wait before retry with exponential backoff
+                time.sleep(backoff_time)
+                backoff_time *= 2
+        
+        if retry_count >= max_retries:
+            print("Max retries reached. Capture stopped.")
 
     def _handle_packet(self, packet):
         """Legacy packet handler"""

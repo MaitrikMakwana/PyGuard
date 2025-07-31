@@ -484,8 +484,10 @@ class DatabaseManager:
         self.db_path = db_path
         self.conn = None
         self.cursor = None
-        self.batch_size = 100
+        self.batch_size = 50  # Reduced from 100 to 50 for better memory management
         self.packet_batch = []
+        self.memory_check_counter = 0
+        self.memory_check_interval = 100  # Check memory every 100 packets
         
         # Initialize database
         self._init_database()
@@ -494,6 +496,17 @@ class DatabaseManager:
         """Initialize database with schema and indexes"""
         try:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            
+            # Enable WAL mode for better concurrency and performance
+            self.conn.execute('PRAGMA journal_mode = WAL')
+            
+            # Reduce synchronous writes for better performance
+            # NORMAL provides a good balance between safety and performance
+            self.conn.execute('PRAGMA synchronous = NORMAL')
+            
+            # Increase cache size for better performance
+            self.conn.execute('PRAGMA cache_size = -10000')  # ~10MB cache
+            
             self.cursor = self.conn.cursor()
             
             # Create enhanced table schema with additional fields
@@ -534,6 +547,100 @@ class DatabaseManager:
             logger.error(f"Database initialization error: {e}")
             raise
     
+    def _optimize_json_details(self, packet_data: Dict[str, Any]) -> str:
+        """
+        Optimize JSON serialization by limiting stored fields
+        
+        Args:
+            packet_data: Dictionary containing packet data
+            
+        Returns:
+            str: JSON string with optimized fields
+        """
+        # Create a subset of the packet data with only essential fields
+        essential_fields = {
+            'timestamp': packet_data.get('timestamp'),
+            'src_ip': packet_data.get('src_ip'),
+            'dst_ip': packet_data.get('dst_ip'),
+            'protocol': packet_data.get('protocol'),
+            'src_port': packet_data.get('src_port'),
+            'dst_port': packet_data.get('dst_port'),
+            'packet_length': packet_data.get('packet_length'),
+            'payload_length': packet_data.get('payload_length'),
+            'tcp_flags': packet_data.get('tcp_flags', {}),
+        }
+        
+        # Include protocol-specific fields based on protocol
+        protocol = packet_data.get('protocol', '').upper()
+        
+        if protocol == 'TCP':
+            essential_fields.update({
+                'tcp_seq': packet_data.get('tcp_seq'),
+                'tcp_ack': packet_data.get('tcp_ack'),
+                'tcp_window': packet_data.get('tcp_window'),
+            })
+        elif protocol == 'UDP':
+            essential_fields.update({
+                'udp_len': packet_data.get('udp_len'),
+                'udp_chksum': packet_data.get('udp_chksum'),
+            })
+        elif protocol == 'ICMP':
+            essential_fields.update({
+                'icmp_type': packet_data.get('icmp_type'),
+                'icmp_code': packet_data.get('icmp_code'),
+            })
+        elif protocol == 'DNS':
+            essential_fields.update({
+                'dns_id': packet_data.get('dns_id'),
+                'dns_qr': packet_data.get('dns_qr'),
+                'dns_qname': packet_data.get('dns_qname'),
+            })
+        elif protocol == 'HTTP':
+            # Include minimal HTTP fields
+            if 'http_method' in packet_data:
+                essential_fields['http_method'] = packet_data['http_method']
+            if 'http_path' in packet_data:
+                essential_fields['http_path'] = packet_data['http_path']
+            if 'http_version' in packet_data:
+                essential_fields['http_version'] = packet_data['http_version']
+        
+        # Serialize to JSON with minimal overhead
+        return json.dumps(essential_fields)
+    
+    def _check_memory_usage(self) -> bool:
+        """
+        Monitor memory usage and take action if it exceeds threshold
+        
+        Returns:
+            bool: True if memory usage is high, False otherwise
+        """
+        try:
+            import psutil
+            process = psutil.Process()
+            memory_info = process.memory_info()
+            memory_percent = process.memory_percent()
+            
+            # If memory usage is above 70%, consider it high
+            if memory_percent > 70:
+                # Force flush the batch to free up memory
+                self.flush_batch()
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
+                
+                return True
+            return False
+        except ImportError:
+            # If psutil is not available, use a simpler approach
+            if len(self.packet_batch) > self.batch_size * 2:
+                self.flush_batch()
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Memory check error: {e}")
+            return False
+    
     def add_packet(self, packet_data: Dict[str, Any]) -> None:
         """
         Add a packet to the batch for later insertion
@@ -541,6 +648,11 @@ class DatabaseManager:
         Args:
             packet_data: Dictionary containing packet data
         """
+        # Periodically check memory usage
+        self.memory_check_counter += 1
+        if self.memory_check_counter >= self.memory_check_interval:
+            self.memory_check_counter = 0
+            self._check_memory_usage()
         # Extract fields for database insertion
         packet_record = (
             packet_data.get('timestamp'),
@@ -557,7 +669,7 @@ class DatabaseManager:
             packet_data.get('tcp_flags', {}).get('RST', 0),
             packet_data.get('tcp_flags', {}).get('PSH', 0),
             packet_data.get('tcp_flags', {}).get('URG', 0),
-            json.dumps(packet_data)
+            self._optimize_json_details(packet_data)
         )
         
         self.packet_batch.append(packet_record)
@@ -626,6 +738,7 @@ class EnhancedPacketCapture:
             'bpf_filter': None,
             'max_packets': 0,
             'duration': 0,
+            'adaptive_sampling': True,  # Enable adaptive sampling by default
             'output_dir': 'captures',
             'output_base': 'packets',
             'db_path': 'packets.db',
@@ -674,14 +787,33 @@ class EnhancedPacketCapture:
     
     def _packet_handler(self, packet) -> None:
         """
-        Handle a captured packet
+        Handle a captured packet with adaptive sampling
         
         Args:
             packet: Scapy packet object
         """
-        # Implement packet sampling
+        # Implement adaptive packet sampling based on packet count
         self.sample_counter += 1
-        if self.sample_counter % self.config['sample_rate'] != 0:
+        
+        # Determine sampling rate based on current packet count
+        if self.config.get('adaptive_sampling', False):
+            if self.packet_count > 700:  # High load threshold
+                adaptive_rate = 5  # Sample every 5th packet
+            elif self.packet_count > 500:  # Medium load threshold
+                adaptive_rate = 3  # Sample every 3rd packet
+            elif self.packet_count > 300:  # Low load threshold
+                adaptive_rate = 2  # Sample every 2nd packet
+            else:
+                adaptive_rate = 1  # Process every packet
+                
+            # Use the adaptive rate instead of the configured rate
+            effective_rate = adaptive_rate
+        else:
+            # Use the configured sample rate
+            effective_rate = self.config['sample_rate']
+        
+        # Skip packets based on sampling rate
+        if effective_rate > 1 and self.sample_counter % effective_rate != 0:
             return
         
         # Check if we've reached the maximum packet count
@@ -695,10 +827,28 @@ class EnhancedPacketCapture:
             return
         
         try:
-            # Put packet in queue for asynchronous processing
-            if not self.packet_queue.full():
-                self.packet_queue.put(packet, block=False)
-            else:
+            # Check queue fill level to implement throttling
+            queue_fill_percent = self.packet_queue.qsize() / self.packet_queue.maxsize * 100
+            
+            # Implement throttling based on queue fill level
+            if queue_fill_percent > 80:
+                # High load - very aggressive throttling
+                if self.packet_count % 10 != 0:  # Process only 1 in 10 packets
+                    return
+            elif queue_fill_percent > 60:
+                # Medium load - aggressive throttling
+                if self.packet_count % 5 != 0:  # Process only 1 in 5 packets
+                    return
+            elif queue_fill_percent > 40:
+                # Moderate load - moderate throttling
+                if self.packet_count % 3 != 0:  # Process only 1 in 3 packets
+                    return
+            
+            # Put packet in queue for asynchronous processing with timeout
+            try:
+                # Use a short timeout to prevent blocking
+                self.packet_queue.put(packet, block=True, timeout=0.01)
+            except queue.Full:
                 self.dropped_packets += 1
                 logger.warning(f"Packet queue full, dropped packet (total dropped: {self.dropped_packets})")
         

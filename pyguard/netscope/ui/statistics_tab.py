@@ -40,37 +40,9 @@ class StatisticsTab(QWidget):
         action_bar.addWidget(self.refreshButton)
         main_layout.addLayout(action_bar)
 
-        # Top row: Traffic volume (line) and Protocol usage (pie) in a card
-        charts_card = QFrame()
-        charts_card.setFrameShape(QFrame.StyledPanel)
-        charts_card.setFrameShadow(QFrame.Raised)
-        charts_card.setStyleSheet('''
-            QFrame {
-                background: rgba(44,44,64,0.45);
-                border-radius: 24px;
-                border: 1.5px solid rgba(255,255,255,0.10);
-                box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.10);
-            }
-        ''')
-        top_row = QHBoxLayout(charts_card)
-        top_row.setContentsMargins(24, 24, 24, 24)
-        top_row.setSpacing(32)
-        self.trafficLineChart = pg.PlotWidget()
-        self.trafficLineChart.setBackground('w')
-        self.trafficLineChart.setStyleSheet('background: transparent; border-radius: 24px;')
-        self.trafficLineChart.setMinimumHeight(260)
-        self.trafficLineChart.setTitle('Traffic Volume Over Time', color='#B0B0B0', size='16pt')
-        self.trafficLineChart.showGrid(x=True, y=True)
-        self.trafficLineChart.getAxis('left').setPen(pg.mkPen(color='#B0B0B0'))
-        self.trafficLineChart.getAxis('bottom').setPen(pg.mkPen(color='#B0B0B0'))
-        top_row.addWidget(self.trafficLineChart)
-        self.protocolPieChart = pg.PlotWidget()
-        self.protocolPieChart.setBackground('w')
-        self.protocolPieChart.setStyleSheet('background: transparent; border-radius: 24px;')
-        self.protocolPieChart.setMinimumHeight(260)
-        self.protocolPieChart.setTitle('Protocol Usage Breakdown', color='#B0B0B0', size='16pt')
-        top_row.addWidget(self.protocolPieChart)
-        main_layout.addWidget(charts_card)
+        # Main statistics layout: 3 tables in a vertical splitter
+        from PyQt5.QtWidgets import QSplitter
+        main_splitter = QSplitter(Qt.Vertical)
 
         # Protocol Legend
         legend_card = QFrame()
@@ -111,59 +83,132 @@ class StatisticsTab(QWidget):
         legend_row.addStretch(1)
         main_layout.addWidget(legend_card)
 
-        # Middle row: Top Talkers and Port Stats in a card
-        mid_card = QFrame()
-        mid_card.setFrameShape(QFrame.StyledPanel)
-        mid_card.setFrameShadow(QFrame.Raised)
-        mid_card.setStyleSheet('''
+        # Top Table: Top Talkers
+        talkers_card = QFrame()
+        talkers_card.setFrameShape(QFrame.StyledPanel)
+        talkers_card.setFrameShadow(QFrame.Raised)
+        talkers_card.setStyleSheet('''
             QFrame {
-                background: rgba(44,44,64,0.45);
+                background: rgba(44,44,64,0.65);
                 border-radius: 18px;
-                border: 1.5px solid rgba(255,255,255,0.10);
+                border: 1.5px solid rgba(0,188,212,0.18);
+                margin-bottom: 8px;
             }
         ''')
-        mid_row = QHBoxLayout(mid_card)
-        mid_row.setContentsMargins(18, 18, 18, 18)
-        mid_row.setSpacing(32)
+        talkers_layout = QVBoxLayout(talkers_card)
+        talkers_layout.setContentsMargins(18, 18, 18, 18)
+        talkers_layout.setSpacing(8)
+        talkers_label = QLabel('Top Talkers (IP)')
+        talkers_label.setFont(QFont('Segoe UI', 16, QFont.Bold))
+        talkers_label.setStyleSheet('color: #00BCD4;')
+        talkers_layout.addWidget(talkers_label)
         self.topTalkersTable = QTableWidget(0, 3)
         self.topTalkersTable.setHorizontalHeaderLabels(['IP', 'Packets', 'Bytes'])
         self.topTalkersTable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.topTalkersTable.setMinimumWidth(320)
-        self.topTalkersTable.setStyleSheet('background: transparent; border-radius: 12px; color: #E0E0E0;')
-        mid_row.addWidget(self.topTalkersTable)
+        self.topTalkersTable.setMinimumHeight(120)
+        self.topTalkersTable.setStyleSheet('background: transparent; border-radius: 12px; color: #E0E0E0; font-size: 15px;')
+        talkers_layout.addWidget(self.topTalkersTable)
+        main_splitter.addWidget(talkers_card)
+
+        # Middle Table: Top Ports
+        ports_card = QFrame()
+        ports_card.setFrameShape(QFrame.StyledPanel)
+        ports_card.setFrameShadow(QFrame.Raised)
+        ports_card.setStyleSheet('''
+            QFrame {
+                background: rgba(44,44,64,0.65);
+                border-radius: 18px;
+                border: 1.5px solid rgba(76,175,80,0.18);
+                margin-bottom: 8px;
+            }
+        ''')
+        ports_layout = QVBoxLayout(ports_card)
+        ports_layout.setContentsMargins(18, 18, 18, 18)
+        ports_layout.setSpacing(8)
+        ports_label = QLabel('Top Ports')
+        ports_label.setFont(QFont('Segoe UI', 16, QFont.Bold))
+        ports_label.setStyleSheet('color: #4CAF50;')
+        ports_layout.addWidget(ports_label)
         self.topPortsTable = QTableWidget(0, 3)
         self.topPortsTable.setHorizontalHeaderLabels(['Port', 'Packets', 'Bytes'])
         self.topPortsTable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.topPortsTable.setMinimumWidth(320)
-        self.topPortsTable.setStyleSheet('background: transparent; border-radius: 12px; color: #E0E0E0;')
-        mid_row.addWidget(self.topPortsTable)
-        main_layout.addWidget(mid_card)
+        self.topPortsTable.setMinimumHeight(120)
+        self.topPortsTable.setStyleSheet('background: transparent; border-radius: 12px; color: #E0E0E0; font-size: 15px;')
+        ports_layout.addWidget(self.topPortsTable)
+        main_splitter.addWidget(ports_card)
 
-        # Bottom row: Packet Size Histogram in a card
-        hist_card = QFrame()
-        hist_card.setFrameShape(QFrame.StyledPanel)
-        hist_card.setFrameShadow(QFrame.Raised)
-        hist_card.setStyleSheet('''
+        # Bottom Table: Protocol Usage
+        proto_card = QFrame()
+        proto_card.setFrameShape(QFrame.StyledPanel)
+        proto_card.setFrameShadow(QFrame.Raised)
+        proto_card.setStyleSheet('''
             QFrame {
-                background: rgba(44,44,64,0.45);
-                border-radius: 24px;
-                border: 1.5px solid rgba(255,255,255,0.10);
+                background: rgba(44,44,64,0.65);
+                border-radius: 18px;
+                border: 1.5px solid rgba(255,152,0,0.18);
             }
         ''')
-        hist_layout = QVBoxLayout(hist_card)
-        hist_layout.setContentsMargins(24, 24, 24, 24)
-        hist_layout.setSpacing(16)
-        self.sizeHistogram = pg.PlotWidget()
-        self.sizeHistogram.setBackground('w')
-        self.sizeHistogram.setStyleSheet('background: transparent; border-radius: 24px;')
-        self.sizeHistogram.setMinimumHeight(220)
-        self.sizeHistogram.setTitle('Packet Size Distribution', color='#B0B0B0', size='16pt')
-        self.sizeHistogram.getAxis('left').setPen(pg.mkPen(color='#B0B0B0'))
-        self.sizeHistogram.getAxis('bottom').setPen(pg.mkPen(color='#B0B0B0'))
-        hist_layout.addWidget(self.sizeHistogram)
-        main_layout.addWidget(hist_card)
-        main_layout.addStretch(1)
+        proto_layout = QVBoxLayout(proto_card)
+        proto_layout.setContentsMargins(18, 18, 18, 18)
+        proto_layout.setSpacing(8)
+        proto_label = QLabel('Protocol Usage')
+        proto_label.setFont(QFont('Segoe UI', 16, QFont.Bold))
+        proto_label.setStyleSheet('color: #FF9800;')
+        proto_layout.addWidget(proto_label)
+        self.protocolUsageTable = QTableWidget(0, 4)
+        self.protocolUsageTable.setHorizontalHeaderLabels(['Protocol', 'Packets', 'Bytes', 'Percent'])
+        self.protocolUsageTable.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.protocolUsageTable.setMinimumHeight(120)
+        self.protocolUsageTable.setStyleSheet('background: transparent; border-radius: 12px; color: #E0E0E0; font-size: 15px;')
+        proto_layout.addWidget(self.protocolUsageTable)
+        main_splitter.addWidget(proto_card)
+
+        # Add the splitter to the main layout
+        main_layout.addWidget(main_splitter)
 
     def update_statistics(self, stats=None):
-        # This will be filled in app.py to update all charts/tables
-        pass 
+        """
+        Update the statistics tables with new data.
+        stats: dict with keys 'top_talkers', 'top_ports', 'protocol_usage'.
+        Each value should be a list of dicts/tuples as described below:
+        {
+            'top_talkers': [ {'ip': '1.2.3.4', 'packets': 100, 'bytes': 2048}, ... ],
+            'top_ports':   [ {'port': 80, 'packets': 200, 'bytes': 4096}, ... ],
+            'protocol_usage': [ {'protocol': 'TCP', 'packets': 300, 'bytes': 8192, 'percent': 60.0}, ... ]
+        }
+        """
+        # Clear all tables
+        self.topTalkersTable.setRowCount(0)
+        self.topPortsTable.setRowCount(0)
+        self.protocolUsageTable.setRowCount(0)
+
+        if not stats:
+            return
+
+        # Top Talkers Table
+        talkers = stats.get('top_talkers', [])
+        for row, entry in enumerate(talkers):
+            self.topTalkersTable.insertRow(row)
+            self.topTalkersTable.setItem(row, 0, QTableWidgetItem(str(entry.get('ip', ''))))
+            self.topTalkersTable.setItem(row, 1, QTableWidgetItem(str(entry.get('packets', ''))))
+            self.topTalkersTable.setItem(row, 2, QTableWidgetItem(str(entry.get('bytes', ''))))
+
+        # Top Ports Table
+        ports = stats.get('top_ports', [])
+        for row, entry in enumerate(ports):
+            self.topPortsTable.insertRow(row)
+            self.topPortsTable.setItem(row, 0, QTableWidgetItem(str(entry.get('port', ''))))
+            self.topPortsTable.setItem(row, 1, QTableWidgetItem(str(entry.get('packets', ''))))
+            self.topPortsTable.setItem(row, 2, QTableWidgetItem(str(entry.get('bytes', ''))))
+
+        # Protocol Usage Table
+        protocols = stats.get('protocol_usage', [])
+        for row, entry in enumerate(protocols):
+            self.protocolUsageTable.insertRow(row)
+            self.protocolUsageTable.setItem(row, 0, QTableWidgetItem(str(entry.get('protocol', ''))))
+            self.protocolUsageTable.setItem(row, 1, QTableWidgetItem(str(entry.get('packets', ''))))
+            self.protocolUsageTable.setItem(row, 2, QTableWidgetItem(str(entry.get('bytes', ''))))
+            percent = entry.get('percent', '')
+            if isinstance(percent, float):
+                percent = f"{percent:.2f}%"
+            self.protocolUsageTable.setItem(row, 3, QTableWidgetItem(str(percent)))

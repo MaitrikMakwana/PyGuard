@@ -1,0 +1,1 @@
+crash:'DashboardTab' object has no attribute 'activeFilterCard'

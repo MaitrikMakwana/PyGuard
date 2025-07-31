@@ -1,6 +1,7 @@
 import sys
 import os
 import csv
+import time
 from PyQt5.QtWidgets import QApplication, QMainWindow, QMessageBox, QTabWidget, QToolBar, QLabel, QComboBox, QPushButton, QVBoxLayout, QWidget, QFileDialog, QHBoxLayout, QSizePolicy, QStyle, QAction, QVBoxLayout
 from PyQt5.QtCore import QTimer, QSize, QPropertyAnimation, QEasingCurve
 from netscope.ui.dashboard_tab import DashboardTab
@@ -38,6 +39,61 @@ class NetScopeApp(QMainWindow):
         from PyQt5.QtGui import QFont, QIcon
         self.setWindowTitle('PyGuard – Network Analyzer')
         self.setMinimumSize(1400, 900)
+        
+        # Import memory monitoring module
+        import psutil
+        self.psutil_available = True
+        
+        # High load detection and management
+        self.high_load_mode = False
+        self.safe_mode = False
+        self.packet_count_threshold = 700  # Threshold for high load mode
+        self.memory_threshold = 80  # Memory usage percentage threshold
+        self.last_crash_file = 'last_crash.txt'
+        self.restart_safe_file = 'restart_safe.txt'
+        
+        # Memory monitoring timer
+        self.memory_monitor_timer = QTimer(self)
+        self.memory_monitor_timer.timeout.connect(self._monitor_memory_usage)
+        self.memory_monitor_timer.start(10000)  # Check every 10 seconds
+        
+        # Check if we're restarting in safe mode
+        if os.path.exists(self.restart_safe_file):
+            try:
+                with open(self.restart_safe_file, 'r') as f:
+                    if f.read().strip() == '1':
+                        self.safe_mode = True
+                        self.high_load_mode = True
+                        print("Restarting in safe mode after crash")
+                        
+                        # Show notification to user
+                        QTimer.singleShot(1000, lambda: QMessageBox.warning(self, 
+                            'Safe Mode', 
+                            'Application restarted in safe mode after a crash.\n'
+                            'Performance optimizations have been enabled automatically.'))
+                
+                # Remove the file
+                os.remove(self.restart_safe_file)
+            except Exception as e:
+                print(f"Error processing safe mode restart: {e}")
+        
+        # Check if we had a previous crash
+        if os.path.exists(self.last_crash_file) and not self.safe_mode:
+            try:
+                with open(self.last_crash_file, 'r') as f:
+                    crash_data = f.read().strip()
+                    if crash_data.startswith('crash:'):
+                        # Enable high load mode automatically
+                        self.high_load_mode = True
+                        print("Previous crash detected, enabling high load mode")
+                        
+                        # Show notification to user
+                        QTimer.singleShot(2000, lambda: QMessageBox.information(self, 
+                            'Performance Mode', 
+                            'Previous crash detected. Performance optimizations enabled.'))
+            except Exception as e:
+                print(f"Error reading crash file: {e}")
+        
         # Initialize database with enhanced schema
         self._init_enhanced_database()
         # Central widget and layout
@@ -168,6 +224,11 @@ class NetScopeApp(QMainWindow):
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_live_table)
         self.update_timer.start(1000)
+        
+        # Timer for database optimization (run every 2 minutes)
+        self.db_optimize_timer = QTimer(self)
+        self.db_optimize_timer.timeout.connect(self._optimize_database)
+        self.db_optimize_timer.start(120000)  # 2 minutes in milliseconds
         # Apply professional theme stylesheet
         self.setStyleSheet(self._get_stylesheet())
         # --- Animations ---
@@ -301,7 +362,55 @@ class NetScopeApp(QMainWindow):
                 pass
             self.liveCaptureTab.packetSelected.connect(self._on_packet_selected)
 
+    def _check_high_load(self):
+        """Check if we're in a high load situation and adjust settings accordingly"""
+        try:
+            conn = sqlite3.connect('packets.db')
+            cursor = conn.cursor()
+            cursor.execute('SELECT COUNT(*) FROM packets')
+            count = cursor.fetchone()[0]
+            conn.close()
+            
+            # Check if we're approaching the threshold
+            if count > self.packet_count_threshold:
+                if not self.high_load_mode:
+                    print(f"High packet count detected ({count}), enabling high load mode")
+                    self.high_load_mode = True
+                    
+                    # Adjust UI update frequency
+                    self.update_timer.stop()
+                    self.update_timer.start(2000)  # Reduce UI updates to every 2 seconds
+                    
+                    # Show notification to user
+                    QMessageBox.information(self, 'High Load Mode', 
+                                           'High packet count detected. Enabling performance optimizations.')
+                    
+                    # Record the high load event
+                    try:
+                        with open(self.last_crash_file, 'w') as f:
+                            f.write(f'high_load:{count}')
+                    except Exception as e:
+                        print(f"Error writing high load file: {e}")
+            
+            # If packet count is low again, disable high load mode
+            elif self.high_load_mode and count < (self.packet_count_threshold / 2):
+                print(f"Packet count reduced ({count}), disabling high load mode")
+                self.high_load_mode = False
+                
+                # Restore normal UI update frequency
+                self.update_timer.stop()
+                self.update_timer.start(1000)
+                
+        except Exception as e:
+            print(f"Error checking high load: {e}")
+    
     def start_capture(self):
+        # Clean up old packets before starting a new capture
+        self._cleanup_old_packets()
+        
+        # Check for high load situation
+        self._check_high_load()
+        
         interface = self._auto_select_interface()
         
         # Get BPF filter from filter tab
@@ -317,7 +426,19 @@ class NetScopeApp(QMainWindow):
                 QMessageBox.warning(self, 'Invalid Filter', f'BPF filter validation failed:\n{message}')
                 return
         
-        self.capture_manager.start(interface=interface, bpf_filter=bpf_filter)
+        # Configure capture manager based on load mode
+        if self.high_load_mode:
+            # Use enhanced mode with optimized settings for high load
+            self.capture_manager.start(
+                interface=interface, 
+                bpf_filter=bpf_filter,
+                enhanced_mode=True,
+                sample_rate=3  # Sample every 3rd packet
+            )
+            print("Starting capture in high load mode with sampling")
+        else:
+            # Normal mode
+            self.capture_manager.start(interface=interface, bpf_filter=bpf_filter)
         # Update dashboard with active filter
         if hasattr(self.dashboardTab, 'set_active_bpf_filter'):
             self.dashboardTab.set_active_bpf_filter(bpf_filter)
@@ -472,16 +593,58 @@ class NetScopeApp(QMainWindow):
         return None, []
 
     def update_live_table(self):
-        """Update live capture table - enhanced version"""
+        """Update live capture table - enhanced version with adaptive refresh rate"""
         try:
+            # Check if we're in a high-load situation
+            if not hasattr(self, '_packet_count_cache'):
+                self._packet_count_cache = 0
+                self._last_update_time = time.time()
+                self._update_skip_counter = 0
+                self._adaptive_update_interval = 1  # Start with normal updates
+            
+            # Get current packet count
+            try:
+                conn = sqlite3.connect('packets.db')
+                cursor = conn.cursor()
+                cursor.execute('SELECT COUNT(*) FROM packets')
+                current_count = cursor.fetchone()[0]
+                conn.close()
+            except Exception:
+                current_count = 0
+            
+            # Determine if we're in a high-load situation
+            packet_rate = (current_count - self._packet_count_cache) / max(0.1, time.time() - self._last_update_time)
+            self._packet_count_cache = current_count
+            self._last_update_time = time.time()
+            
+            # Adjust update frequency based on packet rate and total count
+            if current_count > 700:  # High load threshold
+                self._adaptive_update_interval = 5  # Update every 5th call
+            elif current_count > 500:  # Medium load threshold
+                self._adaptive_update_interval = 3  # Update every 3rd call
+            elif packet_rate > 50:  # High packet rate
+                self._adaptive_update_interval = 2  # Update every 2nd call
+            else:
+                self._adaptive_update_interval = 1  # Normal updates
+            
+            # Skip updates based on adaptive interval
+            self._update_skip_counter += 1
+            if self._update_skip_counter % self._adaptive_update_interval != 0:
+                return
+            
+            # Reset counter after update
+            self._update_skip_counter = 0
+            
             # Use enhanced live capture refresh if available
             if hasattr(self.liveCaptureTab, 'refresh_packets'):
                 self.liveCaptureTab.refresh_packets()
             else:
-                # Fallback to old method
+                # Fallback to old method with row limiting for performance
                 conn = sqlite3.connect('packets.db')
                 cursor = conn.cursor()
-                cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC')
+                # Limit to 1000 most recent packets for performance
+                # Use a more efficient query with index hints
+                cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets INDEXED BY idx_timestamp ORDER BY id DESC LIMIT 500')
                 all_rows = cursor.fetchall()
                 self.liveCaptureTab.packetTable.setRowCount(len(all_rows))
                 for row_idx, row in enumerate(all_rows):
@@ -498,6 +661,19 @@ class NetScopeApp(QMainWindow):
                 
         except Exception as e:
             print(f"Error updating live table: {e}")
+            # Log the error to help with debugging
+            try:
+                with open('ui_errors.log', 'a') as f:
+                    f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - Error updating live table: {e}\n")
+            except:
+                pass
+            
+            # Try to recover by forcing garbage collection
+            try:
+                import gc
+                gc.collect()
+            except:
+                pass
             
     def _update_old_filter_table(self):
         """Fallback method for old filter table update"""
@@ -512,11 +688,11 @@ class NetScopeApp(QMainWindow):
             
             sql, params = self._parse_filter(filter_str)
             if sql:
-                query = f'SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets WHERE {sql} ORDER BY id DESC'
+                query = f'SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets WHERE {sql} ORDER BY id DESC LIMIT 500'
                 cursor.execute(query, params)
                 filter_rows = cursor.fetchall()
             else:
-                cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC')
+                cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC LIMIT 500')
                 filter_rows = cursor.fetchall()
                 
             if hasattr(self.filterTab, 'filterTable'):
@@ -542,7 +718,8 @@ class NetScopeApp(QMainWindow):
                     break
         except Exception as e:
             print(f"Error handling packet selection: {e}")
-        self.dashboardTab.activeFilterCard.findChild(QLabel, 'activeFilterCardValue').setText(active_filter)
+        # Update the active filter value in the dashboard
+        self.dashboardTab.activeFilterValue.setText(active_filter)
         # --- Live Chart Updates ---
         # 1. Line chart: packets per second over last 60 seconds
         now = datetime.now()
@@ -637,7 +814,8 @@ class NetScopeApp(QMainWindow):
             return
         conn = sqlite3.connect('packets.db')
         cursor = conn.cursor()
-        cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC')
+        # Limit export to most recent 1000 packets for performance
+        cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC LIMIT 1000')
         rows = cursor.fetchall()
         conn.close()
         with open(path, 'w', newline='', encoding='utf-8') as f:
@@ -1199,79 +1377,12 @@ class NetScopeApp(QMainWindow):
         self.tabs.setCurrentWidget(self.packetDetailsTab)
 
     def update_statistics_tab(self):
-        print("DEBUG: update_statistics_tab called")
         import sqlite3, collections
-        from datetime import datetime, timedelta
-        import numpy as np
         conn = sqlite3.connect('packets.db')
         cursor = conn.cursor()
-        cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC')
+        cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets ORDER BY id DESC LIMIT 1000')
         all_rows = cursor.fetchall()
-        # 1. Traffic volume over time (packets per minute for last 60 min)
-        now = datetime.now()
-        window = timedelta(minutes=60)
-        time_buckets = collections.OrderedDict()
-        for i in range(59, -1, -1):
-            t = now - timedelta(minutes=i)
-            label = t.strftime('%H:%M')
-            time_buckets[label] = 0
-        for row in all_rows:
-            try:
-                t = datetime.strptime(row[0], '%Y-%m-%d %H:%M:%S')
-                if now - window < t <= now:
-                    label = t.strftime('%H:%M')
-                    if label in time_buckets:
-                        time_buckets[label] += 1
-            except Exception:
-                pass
-        x = list(range(len(time_buckets)))
-        y = list(time_buckets.values())
-        self.statisticsTab.trafficLineChart.clear()
-        self.statisticsTab.trafficLineChart.plot(x, y, pen=pg.mkPen('#1976D2', width=3))
-        self.statisticsTab.trafficLineChart.getAxis('bottom').setTicks([[(i, l) for i, l in enumerate(time_buckets.keys())][::10]])
-        # 2. Protocol usage breakdown (bar chart)
-        protocol_counts = collections.Counter(row[3].upper() for row in all_rows)
-        protocol_order = ['TCP', 'UDP', 'ICMP', 'ARP', 'DNS', 'HTTP', 'OTHER']
-        labels = []
-        values = []
-        color_map = {
-            'TCP': '#1976D2',
-            'UDP': '#00BCD4',
-            'ICMP': '#43A047',
-            'ARP': '#FBC02D',
-            'DNS': '#8E24AA',
-            'HTTP': '#E64A19',
-            'OTHER': '#757575',
-        }
-        for proto in protocol_order:
-            count = protocol_counts.get(proto, 0)
-            if count > 0:
-                labels.append(proto)
-                values.append(count)
-        for proto, count in protocol_counts.items():
-            if proto not in protocol_order and count > 0:
-                labels.append(proto)
-                values.append(count)
-        self.statisticsTab.protocolPieChart.clear()
-        # Draw pie chart for protocol usage
-        if values:
-            total = sum(values)
-            start_angle = 0
-            for i, (label, value) in enumerate(zip(labels, values)):
-                angle_span = 360 * value / total
-                color = color_map.get(label, '#757575')
-                pie_slice = pg.QtGui.QGraphicsEllipseItem(-100, -100, 200, 200)
-                pie_slice.setStartAngle(int(start_angle * 16))
-                pie_slice.setSpanAngle(int(angle_span * 16))
-                pie_slice.setBrush(pg.mkBrush(color))
-                pie_slice.setPen(pg.mkPen('w', width=2))
-                self.statisticsTab.protocolPieChart.addItem(pie_slice)
-                start_angle += angle_span
-
-        self.statisticsTab.sizeHistogram.clear()
-        bar2 = pg.BarGraphItem(x=np.array([0, 1]), height=[2, 1], width=0.6, brush='b')
-        self.statisticsTab.sizeHistogram.addItem(bar2)
-        # 3. Top talkers (top 10 IPs by packets and bytes)
+        # Top Talkers
         talker_stats = collections.Counter()
         talker_bytes = collections.Counter()
         for row in all_rows:
@@ -1280,22 +1391,11 @@ class NetScopeApp(QMainWindow):
             if src and src != '-':
                 talker_stats[src] += 1
                 talker_bytes[src] += size
-        top_talkers = talker_stats.most_common(10)
-        print('Top Talkers:', top_talkers)
-        self.statisticsTab.topTalkersTable.setRowCount(0)
-        if top_talkers:
-            self.statisticsTab.topTalkersTable.setRowCount(len(top_talkers))
-            for i, (ip, count) in enumerate(top_talkers):
-                bytes_val = talker_bytes[ip]
-                self.statisticsTab.topTalkersTable.setItem(i, 0, QTableWidgetItem(ip))
-                self.statisticsTab.topTalkersTable.setItem(i, 1, QTableWidgetItem(str(count)))
-                self.statisticsTab.topTalkersTable.setItem(i, 2, QTableWidgetItem(str(bytes_val)))
-        else:
-            self.statisticsTab.topTalkersTable.setRowCount(1)
-            self.statisticsTab.topTalkersTable.setItem(0, 0, QTableWidgetItem('No data'))
-            self.statisticsTab.topTalkersTable.setItem(0, 1, QTableWidgetItem(''))
-            self.statisticsTab.topTalkersTable.setItem(0, 2, QTableWidgetItem(''))
-        # 4. Top ports (top 10 by packets and bytes)
+        top_talkers = [
+            {'ip': ip, 'packets': count, 'bytes': talker_bytes[ip]}
+            for ip, count in talker_stats.most_common(10)
+        ]
+        # Top Ports
         port_stats = collections.Counter()
         port_bytes = collections.Counter()
         for row in all_rows:
@@ -1303,38 +1403,150 @@ class NetScopeApp(QMainWindow):
                 if port and port != '-':
                     port_stats[port] += 1
                     port_bytes[port] += int(row[6])
-        top_ports = port_stats.most_common(10)
-        print('Top Ports:', top_ports)
-        self.statisticsTab.topPortsTable.setRowCount(0)
-        if top_ports:
-            self.statisticsTab.topPortsTable.setRowCount(len(top_ports))
-            for i, (port, count) in enumerate(top_ports):
-                bytes_val = port_bytes[port]
-                self.statisticsTab.topPortsTable.setItem(i, 0, QTableWidgetItem(str(port)))
-                self.statisticsTab.topPortsTable.setItem(i, 1, QTableWidgetItem(str(count)))
-                self.statisticsTab.topPortsTable.setItem(i, 2, QTableWidgetItem(str(bytes_val)))
-        else:
-            self.statisticsTab.topPortsTable.setRowCount(1)
-            self.statisticsTab.topPortsTable.setItem(0, 0, QTableWidgetItem('No data'))
-            self.statisticsTab.topPortsTable.setItem(0, 1, QTableWidgetItem(''))
-            self.statisticsTab.topPortsTable.setItem(0, 2, QTableWidgetItem(''))
-        # 5. Packet size distribution (histogram)
-        sizes = [int(row[6]) for row in all_rows if row[6] and str(row[6]).isdigit()]
-        self.statisticsTab.sizeHistogram.clear()
-        if sizes:
-            y, x = np.histogram(sizes, bins=20)
-            x_centers = (x[:-1] + x[1:]) / 2
-            bg = pg.BarGraphItem(x=x_centers, height=y, width=(x[1]-x[0])*0.9, brush='#1976D2', pen='#1976D2')
-            self.statisticsTab.sizeHistogram.addItem(bg)
-            self.statisticsTab.sizeHistogram.setLabel('left', 'Count')
-            self.statisticsTab.sizeHistogram.setLabel('bottom', 'Packet Size (bytes)')
+        top_ports = [
+            {'port': port, 'packets': count, 'bytes': port_bytes[port]}
+            for port, count in port_stats.most_common(10)
+        ]
+        # Protocol Usage
+        protocol_stats = collections.Counter(row[3].upper() for row in all_rows)
+        total_packets = sum(protocol_stats.values())
+        protocol_bytes = collections.Counter()
+        for row in all_rows:
+            proto = row[3].upper()
+            protocol_bytes[proto] += int(row[6])
+        protocol_usage = []
+        for proto, count in protocol_stats.items():
+            percent = (count / total_packets * 100) if total_packets else 0
+            protocol_usage.append({
+                'protocol': proto,
+                'packets': count,
+                'bytes': protocol_bytes[proto],
+                'percent': percent
+            })
+        # Sort protocol_usage by packets descending
+        protocol_usage.sort(key=lambda x: x['packets'], reverse=True)
+        # Call the new update_statistics method
+        self.statisticsTab.update_statistics({
+            'top_talkers': top_talkers,
+            'top_ports': top_ports,
+            'protocol_usage': protocol_usage
+        })
         conn.close()
 
     def _on_tab_changed(self, index):
         if self.tabs.widget(index) == self.statisticsTab:
             self.update_statistics_tab()
+            
+    def _monitor_memory_usage(self):
+        """Monitor memory usage and take action if it gets too high"""
+        try:
+            if not hasattr(self, 'psutil_available') or not self.psutil_available:
+                return
+                
+            import psutil
+            memory_percent = psutil.virtual_memory().percent
+            
+            # If memory usage is above threshold, take action
+            if memory_percent > self.memory_threshold:
+                print(f"High memory usage detected: {memory_percent}%")
+                
+                # If we're capturing packets, stop the capture
+                if self.capture_manager.running:
+                    print("Stopping packet capture due to high memory usage")
+                    self.stop_capture()
+                    
+                    # Show notification to user
+                    QMessageBox.warning(self, 
+                        'High Memory Usage', 
+                        f'Memory usage is high ({memory_percent}%). Packet capture has been stopped to prevent crashes.')
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
+                
+                # Enable high load mode
+                if not self.high_load_mode:
+                    self.high_load_mode = True
+                    print("Enabling high load mode due to high memory usage")
+        except Exception as e:
+            print(f"Error monitoring memory usage: {e}")
 
 # Entry point
+    def _cleanup_old_packets(self):
+        """Clean up old packets to prevent database growth"""
+        try:
+            conn = sqlite3.connect('packets.db')
+            cursor = conn.cursor()
+            
+            # Get total packet count
+            cursor.execute('SELECT COUNT(*) FROM packets')
+            total_count = cursor.fetchone()[0]
+            
+            # If we have more than 1000 packets, delete the oldest ones
+            if total_count > 1000:
+                # Keep the 1000 most recent packets
+                cursor.execute('DELETE FROM packets WHERE id NOT IN (SELECT id FROM packets ORDER BY id DESC LIMIT 1000)')
+                deleted_count = conn.total_changes
+                print(f"Cleaned up {deleted_count} old packets")
+                
+                # Perform a vacuum operation if we deleted a significant number of packets
+                if deleted_count > 100:
+                    print("Performing database vacuum to optimize storage...")
+                    cursor.execute('VACUUM')
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Error cleaning up old packets: {e}")
+            
+    def _optimize_database(self):
+        """Perform database optimization operations"""
+        try:
+            conn = sqlite3.connect('packets.db')
+            cursor = conn.cursor()
+            
+            # Check database size
+            cursor.execute("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()")
+            db_size = cursor.fetchone()[0]
+            db_size_mb = db_size / (1024 * 1024)
+            
+            # If database is larger than 50MB, be more aggressive with cleanup
+            if db_size_mb > 50:
+                print(f"Database size is large ({db_size_mb:.2f} MB). Performing aggressive cleanup...")
+                # Keep only the 500 most recent packets
+                cursor.execute('DELETE FROM packets WHERE id NOT IN (SELECT id FROM packets ORDER BY id DESC LIMIT 500)')
+                deleted_count = conn.total_changes
+                print(f"Aggressively cleaned up {deleted_count} old packets")
+                
+                # Vacuum the database to reclaim space
+                cursor.execute('VACUUM')
+            else:
+                # Run ANALYZE to update statistics
+                cursor.execute('ANALYZE')
+            
+            # Run integrity check
+            cursor.execute('PRAGMA integrity_check')
+            integrity_result = cursor.fetchone()[0]
+            if integrity_result != 'ok':
+                print(f"Database integrity check failed: {integrity_result}")
+                
+                # Try to recover by recreating indexes
+                try:
+                    print("Attempting to recover by recreating indexes...")
+                    cursor.execute('REINDEX')
+                except Exception as e:
+                    print(f"Index recreation failed: {e}")
+            
+            # Optimize database settings
+            cursor.execute('PRAGMA temp_store = MEMORY')  # Store temp tables in memory
+            cursor.execute('PRAGMA mmap_size = 30000000')  # Use memory-mapped I/O (about 30MB)
+            
+            conn.close()
+            return integrity_result == 'ok'
+        except Exception as e:
+            print(f"Error optimizing database: {e}")
+            return False
+    
     def _init_enhanced_database(self):
         """Initialize database with enhanced schema"""
         try:
@@ -1402,11 +1614,43 @@ class NetScopeApp(QMainWindow):
         except Exception as e:
             print(f"Error refreshing display filter: {e}")
 
+def record_crash(e):
+    """Record crash information to a file"""
+    try:
+        with open('last_crash.txt', 'w') as f:
+            f.write(f'crash:{str(e)}')
+    except Exception as write_error:
+        print(f"Error writing crash file: {write_error}")
+
+def exception_hook(exctype, value, traceback):
+    """Global exception handler to record crashes"""
+    # Call the default handler
+    sys.__excepthook__(exctype, value, traceback)
+    
+    # Record the crash
+    record_crash(value)
+
 def main():
-    app = QApplication(sys.argv)
-    window = NetScopeApp()
-    window.show()
-    sys.exit(app.exec_())
+    # Set up global exception handler
+    sys.excepthook = exception_hook
+    
+    try:
+        app = QApplication(sys.argv)
+        window = NetScopeApp()
+        window.show()
+        sys.exit(app.exec_())
+    except Exception as e:
+        print(f"Critical error: {e}")
+        record_crash(e)
+        # Try to restart in safe mode
+        try:
+            # Write to a file that will be read on next startup
+            with open('restart_safe.txt', 'w') as f:
+                f.write('1')
+            # Restart the application
+            os.execl(sys.executable, sys.executable, *sys.argv)
+        except Exception as restart_error:
+            print(f"Failed to restart: {restart_error}")
 
 if __name__ == '__main__':
     main() 
