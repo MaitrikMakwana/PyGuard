@@ -220,10 +220,17 @@ class NetScopeApp(QMainWindow):
         # Connect filter tab signals
         if hasattr(self.filterTab, 'filterApplied'):
             self.filterTab.filterApplied.connect(self._on_filter_applied)
-        # Timer for live updates
+        # Timer for live updates - use a more reliable timer setup
         self.update_timer = QTimer(self)
         self.update_timer.timeout.connect(self.update_live_table)
-        self.update_timer.start(1000)
+        self.update_timer.setSingleShot(False)  # Continuous timer
+        self.update_timer.setInterval(1000)     # 1 second interval
+        self.update_timer.start()
+        
+        # Backup timer in case the main timer fails
+        self.backup_update_timer = QTimer(self)
+        self.backup_update_timer.timeout.connect(self._check_ui_updates)
+        self.backup_update_timer.start(5000)  # Check every 5 seconds
         
         # Timer for database optimization (run every 2 minutes)
         self.db_optimize_timer = QTimer(self)
@@ -405,52 +412,92 @@ class NetScopeApp(QMainWindow):
             print(f"Error checking high load: {e}")
     
     def start_capture(self):
-        # Clean up old packets before starting a new capture
-        self._cleanup_old_packets()
-        
-        # Check for high load situation
-        self._check_high_load()
-        
-        interface = self._auto_select_interface()
-        
-        # Get BPF filter from filter tab
-        if hasattr(self.filterTab, 'get_current_bpf_filter'):
-            bpf_filter = self.filterTab.get_current_bpf_filter()
-        else:
-            bpf_filter = getattr(self.filterTab, 'filterLineEdit', QLineEdit()).text()
-        
-        # Validate filter if enhanced filtering is available
-        if ENHANCED_FILTERING and bpf_filter:
-            is_valid, message = validate_filter(bpf_filter)
-            if not is_valid:
-                QMessageBox.warning(self, 'Invalid Filter', f'BPF filter validation failed:\n{message}')
+        try:
+            # Clean up old packets before starting a new capture
+            self._cleanup_old_packets()
+            
+            # Check for high load situation
+            self._check_high_load()
+            
+            # Make sure we have a valid interface
+            interface = self._auto_select_interface()
+            if not interface:
+                QMessageBox.warning(self, 'Interface Error', 'No valid network interface found for capture.')
                 return
-        
-        # Configure capture manager based on load mode
-        if self.high_load_mode:
-            # Use enhanced mode with optimized settings for high load
-            self.capture_manager.start(
-                interface=interface, 
-                bpf_filter=bpf_filter,
-                enhanced_mode=True,
-                sample_rate=3  # Sample every 3rd packet
-            )
-            print("Starting capture in high load mode with sampling")
-        else:
-            # Normal mode
-            self.capture_manager.start(interface=interface, bpf_filter=bpf_filter)
-        # Update dashboard with active filter
-        if hasattr(self.dashboardTab, 'set_active_bpf_filter'):
-            self.dashboardTab.set_active_bpf_filter(bpf_filter)
-        # Disable BPF filter editing during capture
-        if hasattr(self.filterTab, 'filterLineEdit'):
-            self.filterTab.filterLineEdit.setReadOnly(True)
-        if hasattr(self.filterTab, 'applyButton'):
-            self.filterTab.applyButton.setEnabled(False)
-        if hasattr(self.filterTab, 'clearButton'):
-            self.filterTab.clearButton.setEnabled(False)
-        filter_msg = f" with filter: {bpf_filter}" if bpf_filter else ""
-        QMessageBox.information(self, 'Capture Started', f'Capturing on {interface}{filter_msg}')
+                
+            print(f"Starting capture on interface: {interface}")
+            
+            # Get BPF filter from filter tab
+            if hasattr(self.filterTab, 'get_current_bpf_filter'):
+                bpf_filter = self.filterTab.get_current_bpf_filter()
+            else:
+                bpf_filter = getattr(self.filterTab, 'filterLineEdit', QLineEdit()).text()
+            
+            # Validate filter if enhanced filtering is available
+            if ENHANCED_FILTERING and bpf_filter:
+                is_valid, message = validate_filter(bpf_filter)
+                if not is_valid:
+                    QMessageBox.warning(self, 'Invalid Filter', f'BPF filter validation failed:\n{message}')
+                    return
+            
+            # Reset UI update tracking
+            self._last_ui_update_time = time.time()
+            self._packet_count_cache = 0
+            self._consecutive_errors = 0
+            
+            # Configure capture manager based on load mode
+            if self.high_load_mode:
+                # Use enhanced mode with optimized settings for high load
+                self.capture_manager.start(
+                    interface=interface, 
+                    bpf_filter=bpf_filter,
+                    enhanced_mode=True,
+                    sample_rate=3  # Sample every 3rd packet
+                )
+                print("Starting capture in high load mode with sampling")
+            else:
+                # Normal mode
+                self.capture_manager.start(interface=interface, bpf_filter=bpf_filter)
+                print("Starting capture in normal mode")
+                
+            # Force an immediate UI update to show we're capturing
+            self.update_live_table()
+            
+            # Update dashboard with active filter
+            try:
+                if hasattr(self.dashboardTab, 'set_active_bpf_filter'):
+                    self.dashboardTab.set_active_bpf_filter(bpf_filter)
+                elif hasattr(self.dashboardTab, 'activeFilterValue'):
+                    self.dashboardTab.activeFilterValue.setText(bpf_filter or "None")
+            except Exception as e:
+                print(f"Error updating dashboard filter: {e}")
+                
+            # Disable BPF filter editing during capture
+            if hasattr(self.filterTab, 'filterLineEdit'):
+                self.filterTab.filterLineEdit.setReadOnly(True)
+            if hasattr(self.filterTab, 'applyButton'):
+                self.filterTab.applyButton.setEnabled(False)
+            if hasattr(self.filterTab, 'clearButton'):
+                self.filterTab.clearButton.setEnabled(False)
+                
+            # Update status message
+            filter_msg = f" with filter: {bpf_filter}" if bpf_filter else ""
+            QMessageBox.information(self, 'Capture Started', f'Capturing on {interface}{filter_msg}')
+            
+            # Make sure the update timer is running
+            if not self.update_timer.isActive():
+                print("Update timer was not active. Starting it...")
+                self.update_timer.start()
+                
+        except Exception as e:
+            print(f"Error starting capture: {e}")
+            QMessageBox.critical(self, 'Capture Error', f'Failed to start packet capture: {str(e)}')
+            
+            # Try to recover
+            try:
+                self.capture_manager.stop()
+            except:
+                pass
 
     def stop_capture(self):
         self.capture_manager.stop()
@@ -593,29 +640,69 @@ class NetScopeApp(QMainWindow):
         return None, []
 
     def update_live_table(self):
-        """Update live capture table - enhanced version with adaptive refresh rate"""
+        """Update live capture table - enhanced version with adaptive refresh rate and improved reliability"""
         try:
+            # Record the update attempt time for the backup timer
+            self._last_ui_update_time = time.time()
+            
             # Check if we're in a high-load situation
             if not hasattr(self, '_packet_count_cache'):
                 self._packet_count_cache = 0
                 self._last_update_time = time.time()
                 self._update_skip_counter = 0
                 self._adaptive_update_interval = 1  # Start with normal updates
+                self._consecutive_errors = 0  # Track consecutive errors
             
-            # Get current packet count
+            # Get current packet count with better error handling
             try:
-                conn = sqlite3.connect('packets.db')
+                conn = sqlite3.connect('packets.db', timeout=5.0)  # Increase timeout for busy database
                 cursor = conn.cursor()
                 cursor.execute('SELECT COUNT(*) FROM packets')
                 current_count = cursor.fetchone()[0]
                 conn.close()
-            except Exception:
-                current_count = 0
+                
+                # Reset error counter on successful database access
+                self._consecutive_errors = 0
+            except Exception as e:
+                print(f"Error getting packet count: {e}")
+                current_count = self._packet_count_cache  # Use last known count
+                self._consecutive_errors += 1
+                
+                # If we have too many consecutive errors, try to recover
+                if self._consecutive_errors > 3:
+                    print("Multiple consecutive database errors. Attempting recovery...")
+                    try:
+                        # Force close any open connections
+                        import gc
+                        gc.collect()
+                        
+                        # Wait a moment
+                        time.sleep(0.5)
+                        
+                        # Try a simple query to reset the connection
+                        test_conn = sqlite3.connect('packets.db', timeout=10.0)
+                        test_conn.execute('SELECT 1')
+                        test_conn.close()
+                        
+                        print("Database connection recovery successful")
+                        self._consecutive_errors = 0
+                    except Exception as recovery_error:
+                        print(f"Database recovery failed: {recovery_error}")
             
             # Determine if we're in a high-load situation
-            packet_rate = (current_count - self._packet_count_cache) / max(0.1, time.time() - self._last_update_time)
+            time_diff = max(0.1, time.time() - self._last_update_time)
+            packet_rate = (current_count - self._packet_count_cache) / time_diff
             self._packet_count_cache = current_count
             self._last_update_time = time.time()
+            
+            # Log packet rate periodically
+            if hasattr(self, '_rate_log_counter'):
+                self._rate_log_counter += 1
+            else:
+                self._rate_log_counter = 0
+                
+            if self._rate_log_counter % 10 == 0:  # Log every 10 updates
+                print(f"Current packet rate: {packet_rate:.1f} packets/second, Total: {current_count}")
             
             # Adjust update frequency based on packet rate and total count
             if current_count > 700:  # High load threshold
@@ -637,27 +724,25 @@ class NetScopeApp(QMainWindow):
             
             # Use enhanced live capture refresh if available
             if hasattr(self.liveCaptureTab, 'refresh_packets'):
-                self.liveCaptureTab.refresh_packets()
+                try:
+                    self.liveCaptureTab.refresh_packets()
+                except Exception as e:
+                    print(f"Error in enhanced refresh: {e}")
+                    # Fall back to basic refresh method
+                    self._basic_table_refresh()
             else:
-                # Fallback to old method with row limiting for performance
-                conn = sqlite3.connect('packets.db')
-                cursor = conn.cursor()
-                # Limit to 1000 most recent packets for performance
-                # Use a more efficient query with index hints
-                cursor.execute('SELECT timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size FROM packets INDEXED BY idx_timestamp ORDER BY id DESC LIMIT 500')
-                all_rows = cursor.fetchall()
-                self.liveCaptureTab.packetTable.setRowCount(len(all_rows))
-                for row_idx, row in enumerate(all_rows):
-                    for col_idx, value in enumerate(row):
-                        self.liveCaptureTab.packetTable.setItem(row_idx, col_idx, self.make_table_item(str(value)))
-                conn.close()
+                # Use basic refresh method
+                self._basic_table_refresh()
             
             # Update filter tab if enhanced filtering is available
-            if hasattr(self.filterTab, '_refresh_filtered_table'):
-                self.filterTab._refresh_filtered_table()
-            else:
-                # Fallback to old filter method
-                self._update_old_filter_table()
+            try:
+                if hasattr(self.filterTab, '_refresh_filtered_table'):
+                    self.filterTab._refresh_filtered_table()
+                else:
+                    # Fallback to old filter method
+                    self._update_old_filter_table()
+            except Exception as e:
+                print(f"Error updating filter table: {e}")
                 
         except Exception as e:
             print(f"Error updating live table: {e}")
@@ -674,6 +759,44 @@ class NetScopeApp(QMainWindow):
                 gc.collect()
             except:
                 pass
+    
+    def _basic_table_refresh(self):
+        """Basic table refresh method as a fallback"""
+        try:
+            conn = sqlite3.connect('packets.db', timeout=5.0)
+            cursor = conn.cursor()
+            
+            # Use a more efficient query with LIMIT
+            cursor.execute('''
+                SELECT id, timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size 
+                FROM packets 
+                ORDER BY id DESC 
+                LIMIT 500
+            ''')
+            
+            all_rows = cursor.fetchall()
+            
+            # Disable UI updates during table population
+            self.liveCaptureTab.packetTable.setUpdatesEnabled(False)
+            
+            # Set row count once
+            self.liveCaptureTab.packetTable.setRowCount(len(all_rows))
+            
+            # Populate table
+            for row_idx, row in enumerate(all_rows):
+                for col_idx, value in enumerate(row):
+                    self.liveCaptureTab.packetTable.setItem(row_idx, col_idx, self.make_table_item(str(value)))
+            
+            # Re-enable UI updates
+            self.liveCaptureTab.packetTable.setUpdatesEnabled(True)
+            
+            # Update packet count in status bar
+            if hasattr(self.liveCaptureTab, 'packetCountLabel'):
+                self.liveCaptureTab.packetCountLabel.setText(f"Packets: {self._packet_count_cache}")
+                
+            conn.close()
+        except Exception as e:
+            print(f"Error in basic table refresh: {e}")
             
     def _update_old_filter_table(self):
         """Fallback method for old filter table update"""
@@ -1437,6 +1560,27 @@ class NetScopeApp(QMainWindow):
         if self.tabs.widget(index) == self.statisticsTab:
             self.update_statistics_tab()
             
+    def _check_ui_updates(self):
+        """Backup function to ensure UI updates are happening"""
+        try:
+            # Check when the last UI update happened
+            current_time = time.time()
+            if not hasattr(self, '_last_ui_update_time'):
+                self._last_ui_update_time = current_time
+                return
+                
+            # If it's been more than 10 seconds since the last update, force an update
+            if current_time - self._last_ui_update_time > 10:
+                print("UI updates appear to be stalled. Forcing update...")
+                self.update_live_table()
+                
+                # Restart the main timer if it seems to have stopped
+                if not self.update_timer.isActive():
+                    print("Main update timer is not active. Restarting...")
+                    self.update_timer.start()
+        except Exception as e:
+            print(f"Error in backup UI update check: {e}")
+    
     def _monitor_memory_usage(self):
         """Monitor memory usage and take action if it gets too high"""
         try:

@@ -48,30 +48,6 @@ class CaptureManager:
             self._connection_pool.append(conn)
         else:
             conn.close()
-    
-    def __init__(self, db_path='packets.db'):
-        self.db_path = db_path
-        self._connection_pool = []
-        self._max_pool_size = 3  # Maximum number of connections in the pool
-        
-        # Get initial connection and create tables
-        self.conn = self._get_connection()
-        self.cursor = self.conn.cursor()
-        self._ensure_table()
-        
-        self.thread = None
-        self.running = False
-        self.interface = None
-        self.bpf_filter = None
-        self.packet_callback = None  # Optional: function to call with each packet (for UI updates)
-        
-        # Enhanced capture support
-        self.enhanced_mode = False
-        self.enhanced_capture = None
-        self.packet_processor = PacketProcessor()
-        self.export_formats = ['json', 'csv']
-        self.export_dir = 'captures'
-        self.export_base = 'packets'
 
     def _ensure_table(self):
         # Create improved table schema with indexes (consistent with packet_sniffer.py)
@@ -193,31 +169,49 @@ class CaptureManager:
             self.thread = None
 
     def _capture_loop(self):
-        """Legacy capture loop with improved error handling"""
+        """Legacy capture loop with improved error handling and continuous capture"""
         max_retries = 3
         retry_count = 0
         backoff_time = 1  # Start with 1 second backoff
+        total_packets_captured = 0
+        capture_sessions = 0
         
-        while self.running and retry_count < max_retries:
+        # Create a separate connection for the capture thread
+        capture_conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        capture_conn.execute('PRAGMA journal_mode = WAL')
+        capture_conn.execute('PRAGMA synchronous = NORMAL')
+        capture_cursor = capture_conn.cursor()
+        
+        print(f"Starting packet capture thread on interface {self.interface}")
+        
+        # Create a packet buffer to reduce database writes
+        packet_buffer = []
+        max_buffer_size = 50  # Process in batches of 50 packets
+        last_commit_time = time.time()
+        commit_interval = 1.0  # Commit at most once per second
+        
+        while self.running:
             try:
-                # Log capture start
-                print(f"Starting packet capture on interface {self.interface} with filter: {self.bpf_filter}")
+                # Log capture session start
+                capture_sessions += 1
+                print(f"Starting capture session #{capture_sessions} on interface {self.interface} with filter: {self.bpf_filter}")
                 
-                # Set a packet count limit to prevent memory issues
+                # Set a packet count limit to prevent memory issues in each session
                 packet_count = 0
-                max_packets_per_session = 1000  # Increased limit for better performance
+                max_packets_per_session = 1000  # Limit packets per session
                 
                 # Use sampling for high-traffic networks
                 sample_rate = 1  # Process every packet by default
                 
                 def packet_handler(pkt):
-                    nonlocal packet_count, sample_rate
+                    nonlocal packet_count, sample_rate, packet_buffer, last_commit_time, total_packets_captured
                     packet_count += 1
+                    total_packets_captured += 1
                     
-                    # If we've captured too many packets, restart the capture
+                    # If we've captured too many packets in this session, restart the capture
                     if packet_count >= max_packets_per_session:
-                        print(f"Reached packet limit ({max_packets_per_session}), restarting capture")
-                        return True  # Stop the current capture
+                        print(f"Reached session packet limit ({max_packets_per_session}), will start new session")
+                        return True  # Stop the current capture session
                     
                     # Implement adaptive sampling based on traffic volume
                     if packet_count % 100 == 0:
@@ -229,7 +223,93 @@ class CaptureManager:
                     
                     # Process the packet (with sampling)
                     if packet_count % sample_rate == 0:
-                        self._handle_packet(pkt)
+                        # Extract packet details
+                        details = {}
+                        proto_name = "OTHER"
+                        src = dst = src_port = dst_port = "-"
+                        
+                        # Extract basic packet information
+                        try:
+                            # Ethernet
+                            if pkt.haslayer(Ether):
+                                details['eth_src'] = pkt[Ether].src
+                                details['eth_dst'] = pkt[Ether].dst
+                            # IP
+                            if pkt.haslayer(IP):
+                                src = pkt[IP].src
+                                dst = pkt[IP].dst
+                                details['ip_ttl'] = pkt[IP].ttl
+                                proto_name = {6: "TCP", 17: "UDP", 1: "ICMP"}.get(pkt[IP].proto, str(pkt[IP].proto))
+                            # TCP
+                            if pkt.haslayer(TCP):
+                                src_port = str(pkt[TCP].sport)
+                                dst_port = str(pkt[TCP].dport)
+                                details['tcp_flags'] = str(pkt[TCP].flags)
+                            # UDP
+                            elif pkt.haslayer(UDP):
+                                src_port = str(pkt[UDP].sport)
+                                dst_port = str(pkt[UDP].dport)
+                            # ICMP
+                            elif pkt.haslayer(ICMP):
+                                proto_name = "ICMP"
+                                details['icmp_type'] = pkt[ICMP].type
+                            # ARP
+                            elif pkt.haslayer(ARP):
+                                proto_name = "ARP"
+                                src = pkt[ARP].psrc
+                                dst = pkt[ARP].pdst
+                            
+                            # Calculate size
+                            size = len(pkt)
+                            timestamp = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+                            
+                            # Convert ports to integers, handle None values
+                            src_port_int = int(src_port) if src_port and src_port.isdigit() else None
+                            dst_port_int = int(dst_port) if dst_port and dst_port.isdigit() else None
+                            
+                            # Add to buffer
+                            packet_buffer.append((timestamp, src, dst, proto_name, src_port_int, dst_port_int, size, json.dumps(details)))
+                            
+                            # Process buffer when it reaches limit or time interval
+                            current_time = time.time()
+                            if len(packet_buffer) >= max_buffer_size or (current_time - last_commit_time) >= commit_interval:
+                                try:
+                                    # Use executemany for better performance
+                                    capture_conn.executemany(
+                                        "INSERT INTO packets (timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                                        packet_buffer
+                                    )
+                                    capture_conn.commit()
+                                    
+                                    # Call packet callback for UI updates if provided
+                                    if self.packet_callback and packet_buffer:
+                                        # Only send the last packet for UI update to avoid overwhelming the UI
+                                        last_packet = packet_buffer[-1]
+                                        self.packet_callback({
+                                            'timestamp': last_packet[0],
+                                            'src_ip': last_packet[1],
+                                            'dst_ip': last_packet[2],
+                                            'protocol': last_packet[3],
+                                            'src_port': last_packet[4],
+                                            'dst_port': last_packet[5],
+                                            'size': last_packet[6],
+                                            'details': last_packet[7]
+                                        })
+                                    
+                                    # Clear buffer and update commit time
+                                    packet_buffer.clear()
+                                    last_commit_time = current_time
+                                    
+                                    # Log progress periodically
+                                    if packet_count % 100 == 0:
+                                        print(f"Captured {packet_count} packets in current session, {total_packets_captured} total")
+                                        
+                                except Exception as e:
+                                    print(f"Error committing packet buffer: {e}")
+                                    # Try to recover by clearing buffer
+                                    packet_buffer.clear()
+                        except Exception as e:
+                            print(f"Error processing packet: {e}")
                     
                     # Check if we should stop
                     return not self.running
@@ -243,41 +323,53 @@ class CaptureManager:
                     filter=self.bpf_filter,
                     prn=packet_handler,
                     store=False,
-                    stop_filter=lambda x: packet_count >= max_packets_per_session or not self.running
+                    stop_filter=lambda x: packet_count >= max_packets_per_session or not self.running,
+                    timeout=30  # Add a timeout to ensure we can restart capture sessions
                 )
                 
-                # If we get here and we're still running, it means we hit the packet limit
-                # So we'll loop and start a new capture session
-                if self.running and packet_count >= max_packets_per_session:
-                    print("Restarting capture session")
+                # If we get here, the capture stopped normally
+                if not self.running:
+                    print("Capture stopped by user")
+                    break
+                
+                # If we reached the packet limit, restart the capture
+                if packet_count >= max_packets_per_session:
+                    print(f"Completed capture session #{capture_sessions} with {packet_count} packets")
+                    print("Starting new capture session...")
+                    # Reset retry count since we had a successful session
+                    retry_count = 0
                     continue
                 
-                # If we get here and we're not running, it means stop() was called
-                break
-                
-            except MemoryError:
-                # Handle memory errors specifically
-                print(f"Memory error during capture. Retrying in {backoff_time} seconds...")
-                retry_count += 1
-                
-                # Force garbage collection
-                import gc
-                gc.collect()
-                
-                # Wait before retry with exponential backoff
-                time.sleep(backoff_time)
-                backoff_time *= 2
+                # If we get here due to timeout, just start a new session
+                print(f"Capture session #{capture_sessions} timed out, starting new session")
                 
             except Exception as e:
-                print(f"Capture error: {e}. Retrying in {backoff_time} seconds...")
                 retry_count += 1
-                
-                # Wait before retry with exponential backoff
-                time.sleep(backoff_time)
-                backoff_time *= 2
+                print(f"Error in packet capture (attempt {retry_count}/{max_retries}): {e}")
+                if retry_count < max_retries:
+                    print(f"Retrying in {backoff_time} seconds...")
+                    time.sleep(backoff_time)
+                    backoff_time *= 2
+                else:
+                    print("Max retries reached. Waiting 5 seconds before trying again...")
+                    time.sleep(5)
+                    retry_count = 0  # Reset retry count to keep trying
         
-        if retry_count >= max_retries:
-            print("Max retries reached. Capture stopped.")
+        # Clean up
+        try:
+            # Commit any remaining packets in buffer
+            if packet_buffer:
+                capture_conn.executemany(
+                    "INSERT INTO packets (timestamp, src_ip, dst_ip, protocol, src_port, dst_port, size, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    packet_buffer
+                )
+                capture_conn.commit()
+            
+            # Close the capture connection
+            capture_conn.close()
+            print(f"Capture thread stopped. Total packets captured: {total_packets_captured}")
+        except Exception as e:
+            print(f"Error during capture cleanup: {e}")
 
     def _handle_packet(self, packet):
         """Legacy packet handler"""
